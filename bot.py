@@ -719,8 +719,35 @@ def handle_menu_buttons(message):
 # Fallback direct commands (keep them active for compatibility)
 @bot.message_handler(commands=["status"])
 @admin_only
-def handle_status_command(message):
-    handle_status(message)
+def handle_status(message):
+    global scheduled_news, scheduled_activities, scheduled_analysis, scheduled_date
+    try:
+        now = datetime.now()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM published_posts")
+            db_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM rss_feeds")
+            feed_count = cursor.fetchone()[0]
+            
+        with schedule_lock:
+            news_str = ", ".join([f"{t.strftime('%H:%M')}{'✓' if t in scheduled_news and t < now else ''}" for t in scheduled_news])
+            act_str = ", ".join([f"{t.strftime('%H:%M')}{'✓' if t in scheduled_activities and t < now else ''}" for t in scheduled_activities])
+            an_str = ", ".join([f"{t.strftime('%H:%M')}{'✓' if t in scheduled_analysis and t < now else ''}" for t in scheduled_analysis])
+            curr_date = scheduled_date
+            
+        status_msg = (
+            f"🤖 <b>Статус Crypto Publisher Bot:</b>\n\n"
+            f"📊 Посилань в БД: <code>{db_count}</code> | Джерел: <code>{feed_count}</code>\n"
+            f"📅 Розклад на сьогодні ({curr_date}):\n"
+            f"📰 <b>Новини:</b> {news_str}\n"
+            f"🎁 <b>Активності:</b> {act_str}\n"
+            f"📊 <b>Аналітика:</b> {an_str}\n\n"
+            f"Системний час: <code>{now.strftime('%H:%M:%S')}</code>"
+        )
+        bot.reply_to(message, status_msg, parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка: {e}")
 
 @bot.message_handler(commands=["list_feeds"])
 @admin_only

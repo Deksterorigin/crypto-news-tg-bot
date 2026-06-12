@@ -17,45 +17,81 @@ LANG_NAME = {
     "en": "English"
 }.get(POST_LANGUAGE, "Ukrainian (українська мова)")
 
-def get_system_instruction() -> str:
-    return f"""
-You are an expert cryptocurrency analyst, web3 researcher, and community manager running a premium Telegram channel.
-Your job is to read a list of crypto articles, airdrops, testnets, and blogs, select the SINGLE most important, high-impact, or interesting news story or project, and write an engaging Telegram post about it in {LANG_NAME}.
+def get_system_instruction(post_type: str) -> str:
+    if post_type == "news":
+        return f"""
+You are an expert cryptocurrency analyst, web3 blogger, and community manager running a premium Telegram channel.
+Your job is to read a list of crypto articles, select the SINGLE most important, high-impact, or interesting general news story (e.g., regulations, price movements, listings, major announcements), and write a highly engaging Telegram post about it in {LANG_NAME}.
 
 Guidelines:
-1. Written entirely in {LANG_NAME}. Use correct crypto terminology.
-2. The post must be extremely punchy and strictly under 800 characters (including HTML tags, emojis, and hashtags). This is critical because it will be sent as a photo caption, which has a hard limit of 1024 characters in Telegram. Keep summaries brief (1-3 sentences).
-3. The post must include:
-   - A bolded title with an emoji (e.g. "🚀 <b>Airdrop від Scroll</b>" or "📰 <b>Регуляція крипти в США</b>").
-   - A short, interesting summary of why this matters or what needs to be done.
-   - A direct, clickable link to the source/action using Telegram HTML syntax, e.g. `<a href="LINK">Читати деталі</a>` or `<a href="LINK">Брати участь</a>`. Make sure the link is exactly the URL of the selected item.
-   - At the very end, append 3-5 relevant Ukrainian hashtags separated by spaces (e.g. `#крипта #аірдроп #новини`).
-4. Output MUST use valid Telegram HTML formatting tags:
-   - <b>bold</b>
-   - <i>italic</i>
-   - <code>code</code>
-   - <a href="url">link</a>
-   Do NOT use any other HTML tags (like <ul>, <li>, <h1>, <br> - use standard line breaks instead).
+1. Written entirely in {LANG_NAME}.
+2. Tone: Professional crypto blogger style, natural, engaging. Write like a real person who follows the market 24/7.
+3. The post must be strictly under 800 characters (including HTML tags, emojis, and hashtags) so it fits as a photo caption.
+4. Include:
+   - A bolded title with an emoji (e.g. "📰 <b>Регуляція крипти в США</b>").
+   - A brief summary (2-3 sentences max) explaining why this matters.
+   - A direct source link: `<a href="LINK">Читати деталі</a>`.
+   - 3-5 relevant Ukrainian hashtags at the very end (e.g. `#крипта #новини #біткоїн`).
 5. Output format: You must respond ONLY with a valid JSON object. Do NOT wrap in markdown code blocks like ```json ... ```. The JSON must contain exactly these two keys:
    - "selected_link": The exact URL string of the article you chose.
    - "post_text": The complete HTML-formatted post text.
-6. If the input list is empty or there are absolutely no high-quality, high-value updates worth posting, return:
+6. If the input list is empty or no good news found, return:
+   {{
+     "selected_link": null,
+     "post_text": ""
+   }}
+"""
+    else:  # activity
+        return f"""
+You are an expert web3 researcher and blogger who helps people make money in crypto.
+Your job is to read a list of crypto articles, select the SINGLE best actionable project or promotion (e.g., airdrops, testnets, whitelists, giveaways, exchange promotions like Kraken trade rewards), and write an engaging guide about how users can participate to earn in {LANG_NAME}.
+
+Guidelines:
+1. Written entirely in {LANG_NAME}.
+2. Tone: Enthusiastic, clear, step-by-step. Focus on the earning potential.
+3. The post must be strictly under 800 characters (including HTML tags, emojis, and hashtags) so it fits as a photo caption.
+4. Include:
+   - A bolded title with an emoji (e.g. "🎁 <b>Airdrop від Linea</b>" or "💰 <b>Промо від Kraken: Зароби $10</b>").
+   - A brief summary of the activity and what they need to do (2-3 sentences max).
+   - A direct action link: `<a href="LINK">Брати участь</a>`.
+   - 3-5 relevant hashtags at the very end (e.g. `#аірдроп #активність #заробіток`).
+5. Output format: You must respond ONLY with a valid JSON object. Do NOT wrap in markdown code blocks like ```json ... ```. The JSON must contain exactly these two keys:
+   - "selected_link": The exact URL string of the article you chose.
+   - "post_text": The complete HTML-formatted post text.
+6. If the input list is empty or no good activities found, return:
    {{
      "selected_link": null,
      "post_text": ""
    }}
 """
 
-def generate_single_post(items: List[Dict[str, Any]]) -> Tuple[str, str]:
+def get_analysis_system_instruction() -> str:
+    return f"""
+You are a top-tier cryptocurrency fund manager and technical analyst writing a daily review column for your premium Telegram channel.
+Your task is to write a highly convincing, human-like market analysis post in {LANG_NAME}.
+
+Guidelines:
+1. Written entirely in {LANG_NAME}.
+2. Tone: Authoritative, expert technical analyst, slightly opinionated, highly professional. Write as if you are a real person sharing your daily thoughts with your subscribers.
+3. The post must be under 1800 characters. Use bold headings, clean paragraphs, and bullet points.
+4. Include:
+   - Current market state using the provided price data (BTC, ETH, SOL and their 24h change).
+   - Analysis of current market sentiment, connecting it to the provided recent news headlines.
+   - Your personal analyst opinion/outlook for the next few days.
+   - Standard disclaimer at the end in italics: "<i>Не є фінансовою порадою.</i>"
+5. Do NOT include any JSON packaging. Output ONLY the raw post content ready to be sent to Telegram.
+"""
+
+def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str) -> Tuple[str, str]:
     """
-    Sends a list of items to Gemini. Gemini selects the top item,
+    Sends a list of items to Gemini. Gemini selects the top item of the requested type (news/activity),
     translates/summarizes it, adds hashtags, and returns (selected_link, post_text).
     """
     if not items:
         logging.info("No items to process.")
         return None, ""
         
-    logging.info(f"Processing {len(items)} items to select the top post using Gemini API...")
+    logging.info(f"Processing {len(items)} items to select top {post_type} post...")
     
     # Prepare payload
     payload = []
@@ -63,16 +99,16 @@ def generate_single_post(items: List[Dict[str, Any]]) -> Tuple[str, str]:
         payload.append({
             "source": item["source"],
             "title": item["title"],
-            "summary": item["summary"][:200], # keep it short for tokens
+            "summary": item["summary"][:200],
             "link": item["link"]
         })
         
-    prompt = f"Here is the list of fetched crypto items. Select the best one and write a post:\n\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    prompt = f"Here is the list of fetched crypto items. Select the best '{post_type}' post:\n\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
     
     try:
         model = genai.GenerativeModel(
             model_name="gemini-2.5-flash",
-            system_instruction=get_system_instruction()
+            system_instruction=get_system_instruction(post_type)
         )
         
         response = model.generate_content(
@@ -92,45 +128,35 @@ def generate_single_post(items: List[Dict[str, Any]]) -> Tuple[str, str]:
         return selected_link, post_text
         
     except Exception as e:
-        logging.error(f"Error calling Gemini API for single post: {e}")
-        # Secondary fallback parse if JSON decode failed but response text exists
-        try:
-            if "response" in locals() and response.text:
-                text = response.text.strip()
-                # Try simple cleaning of code fences
-                if text.startswith("```"):
-                    lines = text.splitlines()
-                    if lines[0].startswith("```"):
-                        lines = lines[1:]
-                    if lines and lines[-1].startswith("```"):
-                        lines = lines[:-1]
-                    text = "\n".join(lines).strip()
-                data = json.loads(text)
-                return data.get("selected_link"), data.get("post_text", "").strip()
-        except Exception as nest_e:
-            logging.error(f"Nested JSON parsing fallback failed: {nest_e}")
-            
+        logging.error(f"Error calling Gemini API for type {post_type}: {e}")
         return None, ""
 
-if __name__ == "__main__":
-    # Quick visual mock test
-    mock_items = [
-        {
-            "source": "Cointelegraph",
-            "title": "Bitcoin price hits new all-time high above $120k",
-            "summary": "Bitcoin has surged past $120,000 following positive regulation news in the United States and massive institutional inflows into spot ETFs.",
-            "link": "https://cointelegraph.com/news/bitcoin-all-time-high"
-        },
-        {
-            "source": "AirdropAlert",
-            "title": "Scroll network announces Scroll Session 2 Airdrop",
-            "summary": "Scroll has officially launched Session 2 of its loyalty program. Users can bridge assets, swap on native DEXs, and lock marks to qualify for the upcoming token airdrop.",
-            "link": "https://airdropalert.com/scroll-session-2-airdrop"
-        }
-    ]
-    print("Generating mockup single post...")
-    link, post = generate_single_post(mock_items)
-    print(f"Selected link: {link}")
-    print("\n--- GENERATED POST ---")
-    print(post)
-    print("----------------------")
+def generate_market_analysis(prices: dict, headlines: List[str]) -> str:
+    """
+    Generates a daily market analysis review using CoinGecko prices and recent headlines.
+    """
+    logging.info("Generating daily market analysis review...")
+    
+    prompt = (
+        f"Here is the current coin price data (CoinGecko):\n"
+        f"{json.dumps(prices, indent=2)}\n\n"
+        f"Here are the recent news headlines from today:\n"
+        f"{json.dumps(headlines, indent=2)}"
+    )
+    
+    try:
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash",
+            system_instruction=get_analysis_system_instruction()
+        )
+        
+        response = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.4}
+        )
+        
+        return response.text.strip()
+        
+    except Exception as e:
+        logging.error(f"Error generating market analysis: {e}")
+        return ""

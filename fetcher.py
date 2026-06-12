@@ -8,16 +8,7 @@ from db import is_already_published
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# RSS Feeds dictionary
-RSS_FEEDS = {
-    "Cointelegraph": "https://cointelegraph.com/rss",
-    "CoinDesk": "https://www.coindesk.com/arc/outboundfeed/rss/",
-    "Decrypt": "https://decrypt.co/feed",
-    "AirdropAlert": "https://airdropalert.com/feed/rssfeed",
-    "Vitalik's Blog": "https://vitalik.ca/feed/",
-    "a16z Crypto": "https://a16zcrypto.substack.com/feed",
-    "Coinbase Blog": "https://blog.coinbase.com/feed"
-}
+# Feeds are loaded dynamically from the SQLite database
 
 def extract_image_url(article_url: str) -> str:
     """Scrapes the article page to find the Open Graph og:image URL."""
@@ -91,10 +82,12 @@ def fetch_feed(source_name: str, feed_url: str) -> List[Dict[str, Any]]:
     return items
 
 def fetch_all_new_items() -> List[Dict[str, Any]]:
-    """Fetches all new items from all configured RSS feeds."""
+    """Fetches all new items from all database-configured RSS feeds."""
+    from db import get_rss_feeds
+    feeds = get_rss_feeds()
     all_items = []
-    for source_name, url in RSS_FEEDS.items():
-        all_items.extend(fetch_feed(source_name, url))
+    for feed in feeds:
+        all_items.extend(fetch_feed(feed["name"], feed["url"]))
     return all_items
 
 if __name__ == "__main__":

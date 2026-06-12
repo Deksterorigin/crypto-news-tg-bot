@@ -582,7 +582,7 @@ def handle_test_activity(message):
 @admin_only
 def handle_test_analysis(message):
     bot.reply_to(message, "⏳ Тест: Збір ринкових даних та аналітики (буде надіслано сюди)...")
-    threading.Thread(target=run_market_analysis_cycle, kwargs={"test_chat_id": message.chat.id)).start()
+    threading.Thread(target=run_market_analysis_cycle, kwargs={"test_chat_id": message.chat.id}).start()
 
 if __name__ == "__main__":
     logging.info("Starting bot services (v3 with security and Render support)...")

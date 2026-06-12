@@ -7,10 +7,10 @@ services:
     startCommand: python bot.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        sync: true
+        sync: false
       - key: TELEGRAM_CHANNEL_ID
-        sync: true
+        sync: false
       - key: GEMINI_API_KEY
-        sync: true
+        sync: false
       - key: POST_LANGUAGE
         value: uk

@@ -24,3 +24,43 @@ if not GEMINI_API_KEY:
 
 # Local sqlite db path
 DB_PATH = BASE_DIR / "data.db"
+
+import requests
+import logging
+
+def requests_get_with_retry(url: str, headers: dict = None, timeout: int = 5) -> requests.Response:
+    """Attempts requests.get with proxy rotation, falling back to direct connection on failure."""
+    try:
+        from db import get_setting
+        proxies_str = get_setting("proxies", "").strip()
+    except Exception as e:
+        # Fallback if DB is not initialized yet during initial imports
+        proxies_str = ""
+        
+    if not proxies_str:
+        return requests.get(url, headers=headers, timeout=timeout)
+        
+    # Split by comma or newline
+    proxies_list = [p.strip() for p in proxies_str.replace("\n", ",").split(",") if p.strip()]
+    if not proxies_list:
+        return requests.get(url, headers=headers, timeout=timeout)
+        
+    import random
+    random.shuffle(proxies_list)
+    
+    for proxy in proxies_list:
+        try:
+            logging.info(f"Attempting request to {url} using proxy: {proxy}")
+            response = requests.get(
+                url,
+                headers=headers,
+                proxies={"http": proxy, "https": proxy},
+                timeout=timeout
+            )
+            return response
+        except Exception as e:
+            logging.warning(f"Proxy {proxy} failed for {url}: {e}. Trying next proxy...")
+            
+    # Final fallback: direct connection
+    logging.info(f"All proxies failed. Falling back to direct connection for {url}")
+    return requests.get(url, headers=headers, timeout=timeout)

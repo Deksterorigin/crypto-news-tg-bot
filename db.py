@@ -55,6 +55,16 @@ def init_db():
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Create channel_stats table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS channel_stats (
+                channel_id TEXT,
+                date TEXT,
+                member_count INTEGER,
+                PRIMARY KEY (channel_id, date)
+            )
+        """)
         conn.commit()
         
         # Migration: Check if was_posted column exists in published_posts table, if not add it
@@ -94,6 +104,20 @@ def init_db():
                 (str(DEFAULT_CHANNEL_ID), "Основний канал")
             )
             conn.commit()
+
+    # Populate default settings if missing
+    default_settings = [
+        ("blacklist_words", "presale, pre-sale, 10000%, 1000x, scam, скандал"),
+        ("breaking_keywords", "massive, hack, halving, sec, approved, exploit, bankrupt, liquidation"),
+        ("proxies", "")
+    ]
+    with get_connection() as conn:
+        for key, val in default_settings:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM settings WHERE key = ?", (key,))
+            if cursor.fetchone()[0] == 0:
+                conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, val))
+        conn.commit()
 
 # --- ADMIN & OWNER MANAGEMENT ---
 
@@ -281,6 +305,39 @@ def get_recent_posted_titles(days: int = 7) -> list:
             (f"-{days} days",)
         )
         return [row[0] for row in cursor.fetchall() if row[0]]
+
+def record_channel_stats(channel_id: str, member_count: int):
+    """Records the subscriber count for a channel for the current day."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO channel_stats (channel_id, date, member_count) VALUES (?, ?, ?)",
+            (channel_id, today, member_count)
+        )
+        conn.commit()
+
+def get_channel_analytics(channel_id: str) -> dict:
+    """Returns analytics data (current subscribers, growth over 7 days, etc.)."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT date, member_count FROM channel_stats WHERE channel_id = ? ORDER BY date DESC LIMIT 8",
+            (channel_id,)
+        )
+        rows = cursor.fetchall()
+        
+        if not rows:
+            return {"current": 0, "growth_7d": 0, "history": []}
+            
+        current = rows[0]["member_count"]
+        oldest = rows[-1]["member_count"]
+        growth_7d = current - oldest
+        
+        return {
+            "current": current,
+            "growth_7d": growth_7d,
+            "history": [dict(r) for r in rows]
+        }
 
 # Automatically initialize database when the module is imported
 init_db()

@@ -1,9 +1,9 @@
 import feedparser
 import logging
-import requests
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
-from db import is_already_published
+from db import is_already_published, get_setting
+from config import requests_get_with_retry
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -20,7 +20,7 @@ def extract_image_url(article_url: str) -> str:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        response = requests.get(article_url, headers=headers, timeout=5)
+        response = requests_get_with_retry(article_url, headers=headers, timeout=5)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
             # Try to get Open Graph image tag
@@ -52,8 +52,18 @@ def fetch_feed(source_name: str, feed_url: str) -> List[Dict[str, Any]]:
     items = []
     
     try:
-        # User-Agent header is sometimes required to bypass basic bot protection
-        feed = feedparser.parse(feed_url, request_headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests_get_with_retry(feed_url, headers=headers, timeout=5)
+        
+        if response.status_code != 200:
+            logging.error(f"Failed to fetch feed {source_name} from {feed_url}, status code: {response.status_code}")
+            return []
+            
+        feed = feedparser.parse(response.content)
+        
+        # Fetch blacklist words
+        blacklist_str = get_setting("blacklist_words", "")
+        blacklist = [w.strip().lower() for w in blacklist_str.split(",") if w.strip()]
         
         for entry in feed.entries:
             title = entry.get("title", "").strip()
@@ -62,6 +72,12 @@ def fetch_feed(source_name: str, feed_url: str) -> List[Dict[str, Any]]:
             
             # Basic validation
             if not title or not link:
+                continue
+                
+            # Content Filter (Blacklist)
+            title_lower = title.lower()
+            if any(word in title_lower for word in blacklist):
+                logging.info(f"Skipping article due to blacklist match: '{title}'")
                 continue
                 
             # Check if already published

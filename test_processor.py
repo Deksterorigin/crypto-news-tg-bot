@@ -22,7 +22,7 @@ def main():
     for idx, item in enumerate(batch, 1):
         print(f"  {idx}. [{item['source']}] {item['title']}")
         
-    selected_link, post_text = generate_single_post_by_type(batch, "news")
+    selected_link, post_text, poll = generate_single_post_by_type(batch, "news")
     
     print("\n" + "=" * 20 + " GENERATED POST PREVIEW " + "=" * 20)
     if post_text:
@@ -41,6 +41,12 @@ def main():
             print("⚠️ WARNING: Post exceeds Telegram photo caption limit!")
         else:
             print("✅ Post size is within the safety limits.")
+            
+        if poll:
+            print("\n--- Poll Details ---")
+            print(f"Question: {poll.get('question')}")
+            print(f"Options : {poll.get('options')}")
+            print("--------------------")
     else:
         print("❌ FAILED: No post generated or error occurred.")
     print("=" * 64)

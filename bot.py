@@ -202,7 +202,7 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
                 bot.send_message(test_chat_id, "❌ Не знайдено нових матеріалів для сбору.")
             return False
             
-        selected_link, post_text = generate_single_post_by_type(items, post_type, skip_dedup=(test_chat_id is not None))
+        selected_link, post_text, poll = generate_single_post_by_type(items, post_type, skip_dedup=(test_chat_id is not None))
         
         # Get target channels list from DB
         channels = get_channels()
@@ -226,6 +226,19 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
                 else:
                     bot.send_message(chat_id=target, text=post_text, parse_mode="HTML", disable_web_page_preview=False)
                     logging.info(f"Text post for {post_type} published to {target}.")
+                
+                # Send poll if present
+                if poll and isinstance(poll, dict):
+                    try:
+                        bot.send_poll(
+                            chat_id=target,
+                            question=poll.get("question")[:80],
+                            options=[opt[:30] for opt in poll.get("options", [])],
+                            is_anonymous=True
+                        )
+                        logging.info(f"News/Activity poll sent to {target}.")
+                    except Exception as pole:
+                        logging.error(f"Failed to send poll to {target}: {pole}")
                 
             if not test_chat_id:
                 # Mark all items as processed (not posted)
@@ -278,6 +291,17 @@ def run_market_analysis_cycle(test_chat_id=None) -> bool:
                     parse_mode="HTML",
                     disable_web_page_preview=True
                 )
+                # Send standard market sentiment poll
+                try:
+                    bot.send_poll(
+                        chat_id=target,
+                        question="Які ваші очікування від ринку на найближчу добу?",
+                        options=["🚀 Бичачі (Ріст)", "📉 Ведмежі (Падіння)", "🤷‍♂️ Флет / Невизначеність"],
+                        is_anonymous=True
+                    )
+                    logging.info(f"Market sentiment poll sent to {target}.")
+                except Exception as pole:
+                    logging.error(f"Failed to send sentiment poll to {target}: {pole}")
             logging.info("Market analysis published successfully.")
             return True
         else:
@@ -364,6 +388,82 @@ def scheduler_thread():
             logging.error(f"Error in scheduler_thread: {e}")
             time.sleep(60)
 
+def breaking_news_monitor_thread():
+    """Background thread that monitors RSS feeds for breaking keywords and publishes instantly."""
+    logging.info("Breaking news monitor thread started.")
+    while True:
+        try:
+            # 1. Fetch breaking keywords
+            keywords_str = get_setting("breaking_keywords", "")
+            keywords = [w.strip().lower() for w in keywords_str.split(",") if w.strip()]
+            
+            if keywords:
+                # Fetch new RSS items
+                items = fetch_all_new_items()
+                
+                # Filter items whose titles contain breaking keywords
+                breaking_items = []
+                for item in items:
+                    title_lower = item["title"].lower()
+                    if any(kw in title_lower for kw in keywords):
+                        breaking_items.append(item)
+                
+                if breaking_items:
+                    logging.info(f"Found {len(breaking_items)} potential breaking news items.")
+                    for item in breaking_items:
+                        # Double check if it's already published
+                        from db import is_already_published
+                        if is_already_published(item["link"]):
+                            continue
+                        
+                        selected_link, post_text, poll = generate_single_post_by_type(breaking_items, "breaking", skip_dedup=False)
+                        
+                        if selected_link and post_text:
+                            channels = get_channels()
+                            targets = [ch["channel_id"] for ch in channels]
+                            
+                            if targets:
+                                img_url = extract_image_url(selected_link)
+                                for target in targets:
+                                    if img_url:
+                                        try:
+                                            bot.send_photo(chat_id=target, photo=img_url, caption=post_text, parse_mode="HTML")
+                                            logging.info(f"Breaking news photo post published to {target}")
+                                        except Exception as pe:
+                                            logging.error(f"Failed to post breaking photo to {target}: {pe}. Falling back to text.")
+                                            bot.send_message(chat_id=target, text=post_text, parse_mode="HTML", disable_web_page_preview=False)
+                                    else:
+                                        bot.send_message(chat_id=target, text=post_text, parse_mode="HTML", disable_web_page_preview=False)
+                                        logging.info(f"Breaking news text post published to {target}")
+                                    
+                                    # Send poll if present
+                                    if poll and isinstance(poll, dict):
+                                        try:
+                                            bot.send_poll(
+                                                chat_id=target,
+                                                question=poll.get("question")[:80],
+                                                options=[opt[:30] for opt in poll.get("options", [])],
+                                                is_anonymous=True
+                                            )
+                                            logging.info(f"Breaking news poll sent to {target}")
+                                        except Exception as pole:
+                                            logging.error(f"Failed to send poll for breaking news to {target}: {pole}")
+                                            
+                                # Mark the chosen item as actually posted
+                                selected_item = next((i for i in breaking_items if i["link"] == selected_link), None)
+                                if selected_item:
+                                    mark_as_published(selected_item["link"], selected_item["title"], selected_item["source"], was_posted=1)
+                                
+                                # Mark other breaking items we fetched as processed (not posted) so they don't spam
+                                for b_item in breaking_items:
+                                    if b_item["link"] != selected_link:
+                                        mark_as_published(b_item["link"], b_item["title"], b_item["source"], was_posted=0)
+                                break
+            time.sleep(300)
+        except Exception as e:
+            logging.error(f"Error in breaking news monitor thread: {e}")
+            time.sleep(60)
+
 # --- KEYBOARD BUILDERS ---
 
 def main_menu_keyboard() -> telebot.types.ReplyKeyboardMarkup:
@@ -397,6 +497,43 @@ def get_settings_menu() -> tuple[str, telebot.types.InlineKeyboardMarkup]:
     markup.add(
         telebot.types.InlineKeyboardButton("⏰ Початок вікна (год)", callback_data="set_start_hour"),
         telebot.types.InlineKeyboardButton("⏰ Кінець вікна (год)", callback_data="set_end_hour")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("🔧 Додаткові налаштування", callback_data="advanced_settings")
+    )
+    return text, markup
+
+def get_advanced_settings_menu() -> tuple[str, telebot.types.InlineKeyboardMarkup]:
+    """Generates the advanced settings panel and inline keyboard."""
+    blacklist_words = get_setting("blacklist_words", "presale, pre-sale, 10000%, 1000x, scam, скандал")
+    breaking_keywords = get_setting("breaking_keywords", "massive, hack, halving, sec, approved, exploit, bankrupt, liquidation")
+    proxies = get_setting("proxies", "")
+    
+    blacklist_short = blacklist_words[:100] + ("..." if len(blacklist_words) > 100 else "")
+    breaking_short = breaking_keywords[:100] + ("..." if len(breaking_keywords) > 100 else "")
+    proxies_short = proxies[:100] + ("..." if len(proxies) > 100 else "") if proxies else "Не налаштовано (пряме підключення)"
+    
+    text = (
+        f"🔧 <b>Додаткові налаштування бота:</b>\n\n"
+        f"🚫 <b>Чорний список слів:</b>\n"
+        f"<code>{blacklist_short}</code>\n\n"
+        f"🚨 <b>Ключові слова для Breaking News:</b>\n"
+        f"<code>{breaking_short}</code>\n\n"
+        f"🌐 <b>Список проксі:</b>\n"
+        f"<code>{proxies_short}</code>\n\n"
+        f"<i>Виберіть параметр для зміни:</i>"
+    )
+    
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton("🚫 Чорний Список", callback_data="edit_blacklist"),
+        telebot.types.InlineKeyboardButton("🚨 Breaking слова", callback_data="edit_breaking")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("🌐 Налаштувати Проксі", callback_data="edit_proxies")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="back_to_settings")
     )
     return text, markup
 
@@ -560,6 +697,120 @@ def process_delete_feed(message):
     else:
         bot.send_message(message.chat.id, f"❌ Джерело з адресою <code>{url}</code> не знайдено.", parse_mode="HTML")
 
+def process_edit_blacklist(message):
+    val = message.text.strip()
+    set_setting("blacklist_words", val)
+    bot.send_message(message.chat.id, "✅ Чорний список слів успішно оновлено!", reply_markup=main_menu_keyboard())
+
+def process_edit_breaking(message):
+    val = message.text.strip()
+    set_setting("breaking_keywords", val)
+    bot.send_message(message.chat.id, "✅ Ключові слова для Breaking News успішно оновлено!", reply_markup=main_menu_keyboard())
+
+def process_edit_proxies(message):
+    val = message.text.strip()
+    if val.lower() in ["none", "empty", "очистити", "-", "видалити"]:
+        val = ""
+    set_setting("proxies", val)
+    bot.send_message(message.chat.id, "✅ Список проксі успешно оновлено!", reply_markup=main_menu_keyboard())
+
+def handle_list_admins(message):
+    admins = get_admins()
+    owner_id = get_owner_id()
+    text = f"👑 <b>Власник:</b> <code>{owner_id}</code>\n\n👮‍♂️ <b>Адміністратори:</b>\n"
+    if not admins:
+        text += "Немає додаткових адміністраторів."
+    else:
+        for idx, adm in enumerate(admins, 1):
+            text += f"{idx}. ID: <code>{adm['user_id']}</code> | @{adm['username'] or 'немає'} (доданий: {adm['added_at']})\n"
+    bot.send_message(message.chat.id, text, parse_mode="HTML")
+
+def handle_add_admin(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "⚠️ Використовуйте: <code>/add_admin [ID] [Username]</code>", parse_mode="HTML")
+            return
+        user_id = int(parts[1])
+        username = parts[2] if len(parts) > 2 else ""
+        if add_admin(user_id, username):
+            bot.reply_to(message, f"✅ Користувача <code>{user_id}</code> (@{username or 'немає'}) додано до списку адміністраторів.", parse_mode="HTML")
+        else:
+            bot.reply_to(message, "❌ Не вдалося додати адміністратора.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка: {e}")
+
+def handle_delete_admin(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "⚠️ Використовуйте: <code>/delete_admin [ID]</code>", parse_mode="HTML")
+            return
+        user_id = int(parts[1])
+        if delete_admin(user_id):
+            bot.reply_to(message, f"✅ Адміністратора з ID <code>{user_id}</code> видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard())
+        else:
+            bot.reply_to(message, f"❌ Адміністратора з ID <code>{user_id}</code> не знайдено.", parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка: {e}")
+
+def handle_list_feeds(message):
+    feeds = get_rss_feeds()
+    if not feeds:
+        text = "🔗 <b>Джерела RSS-стрічок:</b>\n\n📭 Немає підключених джерел."
+    else:
+        lines = []
+        for idx, f in enumerate(feeds, 1):
+            lines.append(f"{idx}. <b>{f['name']}</b>\n   <code>{f['url']}</code>")
+        text = "🔗 <b>Активні RSS-джерела:</b>\n\n" + "\n\n".join(lines)
+    bot.send_message(message.chat.id, text, parse_mode="HTML")
+
+def handle_analytics(message):
+    channels = get_channels()
+    if not channels:
+        bot.reply_to(message, "📢 <b>Канали не підключені.</b>\nДодайте хоча б один канал для відстеження аналітики.", parse_mode="HTML")
+        return
+        
+    response_lines = ["📊 <b>Аналітика підключених каналів:</b>\n"]
+    
+    for ch in channels:
+        ch_id = ch["channel_id"]
+        ch_name = ch["name"]
+        
+        try:
+            member_count = bot.get_chat_member_count(ch_id)
+            from db import record_channel_stats, get_channel_analytics
+            record_channel_stats(ch_id, member_count)
+            
+            analytics = get_channel_analytics(ch_id)
+            current = analytics.get("current", member_count)
+            growth = analytics.get("growth_7d", 0)
+            
+            growth_str = f"+{growth}" if growth > 0 else f"{growth}"
+            
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM published_posts WHERE was_posted = 1")
+                total_posts = cursor.fetchone()[0]
+                
+            response_lines.append(
+                f"📢 <b>{ch_name}</b> (<code>{ch_id}</code>):\n"
+                f"👥 Підписників: <b>{current}</b> ({growth_str} за 7 днів)\n"
+                f"✍️ Опубліковано постів (усього): <b>{total_posts}</b>\n"
+            )
+        except Exception as e:
+            logging.error(f"Error fetching analytics for channel {ch_id}: {e}")
+            response_lines.append(
+                f"📢 <b>{ch_name}</b> (<code>{ch_id}</code>):\n"
+                f"⚠️ Помилка зчитування даних Telegram API: {e}\n"
+            )
+            
+    response_lines.append(
+        "<i>Примітка: Через обмеження Telegram Bot API, статистика переглядів постів (ER) недоступна ботам. Відображається лише динаміка підписників та загальна кількість постів.</i>"
+    )
+    
+    bot.send_message(message.chat.id, "\n".join(response_lines), parse_mode="HTML")
+
 # --- CALLBACK QUERY HANDLER FOR INLINE BUTTONS ---
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -608,6 +859,26 @@ def handle_inline_callbacks(call):
     elif action == "delete_feed":
         msg = bot.send_message(chat_id, "❌ Введіть точний URL джерела, яке потрібно видалити:")
         bot.register_next_step_handler(msg, process_delete_feed)
+        bot.answer_callback_query(call.id)
+    elif action == "advanced_settings":
+        text, markup = get_advanced_settings_menu()
+        bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=text, parse_mode="HTML", reply_markup=markup)
+        bot.answer_callback_query(call.id)
+    elif action == "back_to_settings":
+        text, markup = get_settings_menu()
+        bot.edit_message_text(chat_id=chat_id, message_id=call.message.message_id, text=text, parse_mode="HTML", reply_markup=markup)
+        bot.answer_callback_query(call.id)
+    elif action == "edit_blacklist":
+        msg = bot.send_message(chat_id, "🚫 Введіть слова для чорного списку через кому (наприклад: <code>presale, scam, airdrop</code>):", parse_mode="HTML")
+        bot.register_next_step_handler(msg, process_edit_blacklist)
+        bot.answer_callback_query(call.id)
+    elif action == "edit_breaking":
+        msg = bot.send_message(chat_id, "🚨 Введіть ключові слова для Breaking News через кому (наприклад: <code>sec, hack, exploit</code>):", parse_mode="HTML")
+        bot.register_next_step_handler(msg, process_edit_breaking)
+        bot.answer_callback_query(call.id)
+    elif action == "edit_proxies":
+        msg = bot.send_message(chat_id, "🌐 Введіть список проксі через кому або новий рядок у форматі <code>http://user:pass@ip:port</code> (або напишіть 'видалити' для очищення):", parse_mode="HTML")
+        bot.register_next_step_handler(msg, process_edit_proxies)
         bot.answer_callback_query(call.id)
         
     # Test Actions (Dry Run)
@@ -669,8 +940,10 @@ def handle_start(message):
 
     # Admin Help
     help_text = (
-        "👋 <b>Панель Адміністратора (v3.2):</b>\n\n"
+        "👋 <b>Панель Адміністратора (v3.4):</b>\n\n"
         "Використовуйте кнопки меню нижче для управління каналами, RSS-стрічками, розкладом та публікаціями.\n\n"
+        "📊 <b>Аналітика:</b>\n"
+        "/analytics — Аналітика каналів (підписники, приріст, публікації)\n\n"
         "👑 <b>Команди Власника:</b>\n"
         "/list_admins — Список адміністраторів\n"
         "/add_admin [ID] [Нікнейм] — Додати адміністратора\n"
@@ -678,6 +951,11 @@ def handle_start(message):
         "/regenerate — Примусово перегенерувати розклад на сьогодні за поточними налаштуваннями"
     )
     bot.send_message(message.chat.id, help_text, parse_mode="HTML", reply_markup=main_menu_keyboard())
+
+@bot.message_handler(commands=["analytics"])
+@admin_only
+def handle_analytics_command(message):
+    handle_analytics(message)
 
 @bot.message_handler(commands=["regenerate"])
 @admin_only
@@ -810,6 +1088,10 @@ if __name__ == "__main__":
     # 3. Start background scheduler thread
     sched_t = threading.Thread(target=scheduler_thread, daemon=True)
     sched_t.start()
+    
+    # 3b. Start breaking news monitor thread
+    breaking_t = threading.Thread(target=breaking_news_monitor_thread, daemon=True)
+    breaking_t.start()
     
     # 4. Start telegram bot polling
     logging.info("Telegram Bot starts polling...")

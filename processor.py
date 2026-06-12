@@ -33,19 +33,55 @@ If the user provides a "recently_published_titles" list, you MUST NOT select any
 Guidelines:
 1. Written entirely in {LANG_NAME}.
 2. Tone: Professional crypto blogger style, natural, engaging. Write like a real person who follows the market 24/7.
-3. The post must be strictly under 800 characters (including HTML tags, emojis, and hashtags) so it fits as a photo caption.
-4. Include:
+3. Crypto Slang: Adapt the text using professional crypto slang (in Ukrainian transliteration, e.g. use "улетів на місяць" or "дав ікси" instead of "ціна зросла", "дамп" instead of "падіння", "памп", "холд", "рект", "буллран", "ведмежка" etc.).
+4. The post must be strictly under 950 characters (including HTML tags, emojis, and hashtags) so it fits as a photo caption.
+5. Structure:
    - A bolded title with an emoji (e.g. "📰 <b>Регуляція крипти в США</b>").
    - A brief summary (2-3 sentences max) explaining why this matters.
+   - Expert Commentary / Smart Comment: Include a distinct block: "🤖 <b>Думки ШІ:</b> [Analyst commentary connecting this event to potential price movements of relevant coins like BTC, ETH, or SOL, e.g. 'це подія може підштовхнути ціну SOL до зони $180, оскільки...']".
    - A direct source link: `<a href="LINK">Читати деталі</a>`.
    - 3-5 relevant Ukrainian hashtags at the very end (e.g. `#крипта #новини #біткоїн`).
-5. Output format: You must respond ONLY with a valid JSON object. Do NOT wrap in markdown code blocks like ```json ... ```. The JSON must contain exactly these two keys:
+6. Output format: You must respond ONLY with a valid JSON object. Do NOT wrap in markdown code blocks like ```json ... ```. The JSON must contain exactly:
    - "selected_link": The exact URL string of the article you chose.
    - "post_text": The complete HTML-formatted post text.
-6. If the input list is empty or no good news found, return:
+   - "poll": (Optional) If the news is highly controversial, important, or open-ended, include a "poll" object. If not, set to null. The poll object must contain:
+     - "question": A short, engaging question (max 80 chars, e.g. "Чи вплине схвалення ETF на ціну ETH?").
+     - "options": An array of exactly 2 to 4 short options (max 30 chars each, e.g. ["🚀 Так, летимо на місяць!", "📉 Ні, це sell the news", "🤷‍♂️ Подивимося"]).
+7. If the input list is empty or no good news found, return:
    {{
      "selected_link": null,
-     "post_text": ""
+     "post_text": "",
+     "poll": null
+   }}
+"""
+    elif post_type == "breaking":
+        return f"""
+You are an expert cryptocurrency analyst and news reporter.
+Your job is to write an urgent, high-impact Telegram post about a BREAKING crypto event completely in {LANG_NAME}.
+
+CRITICAL REQUIREMENT:
+Even though the input articles are in English, the generated Telegram post must be written 100% in {LANG_NAME}. You must translate the content. Do NOT output any English text in the post body, headers, or hashtags (except proper names of tokens or protocols like BTC, Linea, Binance).
+
+Guidelines:
+1. Written entirely in {LANG_NAME}.
+2. Tone: Urgent, highly informative, concise.
+3. Crypto Slang: Adapt the text using professional crypto slang (in Ukrainian transliteration, e.g. use "улетів на місяць" or "дав ікси" instead of "ціна зросла", "дамп" instead of "падіння", "памп", "холд", "рект", "буллран", "ведмежка" etc.).
+4. The post must be strictly under 950 characters (including HTML tags, emojis, and hashtags) so it fits as a photo caption.
+5. Structure:
+   - Starts with a red siren emoji and a bold header: "🚨 <b>ТЕРМІНОВА НОВИНА: [Title]</b>".
+   - A brief summary (2-3 sentences max) explaining the event and why it is critical for the market right now.
+   - Expert Commentary / Smart Comment: Include a distinct block: "🤖 <b>Думки ШІ:</b> [Analyst commentary connecting this event to potential price movements of relevant coins like BTC, ETH, or SOL]".
+   - A direct source link: `<a href="LINK">Читати деталі</a>`.
+   - 3-5 relevant hashtags (including `#терміново #крипта #новини`).
+6. Output format: You must respond ONLY with a valid JSON object. Do NOT wrap in markdown code blocks like ```json ... ```. The JSON must contain exactly:
+   - "selected_link": The exact URL string of the article you chose.
+   - "post_text": The complete HTML-formatted post text.
+   - "poll": (Optional) If the news warrants an opinion poll, include a "poll" object containing "question" (max 80 chars) and "options" (2 to 4 options, max 30 chars each).
+7. If the input list is empty or no good news found, return:
+   {{
+     "selected_link": null,
+     "post_text": "",
+     "poll": null
    }}
 """
     else:  # activity
@@ -62,12 +98,13 @@ If the user provides a "recently_published_titles" list, you MUST NOT select any
 Guidelines:
 1. Written entirely in {LANG_NAME}.
 2. Tone: Enthusiastic, encouraging, clear, and step-by-step. Focus on the earning potential!
-3. Style & Readability:
+3. Crypto Slang: Use crypto slang where natural (e.g., "аірдроп", "мінтувати", "холд", "лоу-банк", "ікси" etc.).
+4. Style & Readability:
    - Use bold text for headers and key requirements.
    - Format steps as numbered items using emojis (e.g., 1️⃣, 2️⃣, 3️⃣).
    - Use bullet points and empty lines to separate blocks of text so it's very easy to scan on mobile.
-4. The post must be strictly under 850 characters (including HTML tags, emojis, and hashtags) so it fits as a photo caption.
-5. Example structure:
+5. The post must be strictly under 950 characters (including HTML tags, emojis, and hashtags) so it fits as a photo caption.
+6. Example structure:
    🎁 <b>Airdrop від Linea</b>
    
    Опис проекту коротко. Чому це вигідно та скільки можна заробити.
@@ -79,10 +116,10 @@ Guidelines:
    🔗 <a href="LINK">Брати участь тут</a>
    
    #аірдроп #крипта #заробіток
-6. Output format: You must respond ONLY with a valid JSON object. Do NOT wrap in markdown code blocks like ```json ... ```. The JSON must contain exactly these two keys:
+7. Output format: You must respond ONLY with a valid JSON object. Do NOT wrap in markdown code blocks like ```json ... ```. The JSON must contain exactly:
    - "selected_link": The exact URL string of the article you chose.
    - "post_text": The complete HTML-formatted post text.
-7. If the input list is empty or no good activities found, return:
+8. If the input list is empty or no good activities found, return:
    {{
      "selected_link": null,
      "post_text": ""
@@ -99,7 +136,7 @@ Even though the input headlines or data might be in English, the generated colum
 
 Guidelines:
 1. Written entirely in {LANG_NAME}.
-2. Tone: Authoritative, expert technical analyst, slightly opinionated, highly professional. Write as if you are a real person sharing your daily thoughts with your subscribers.
+2. Tone: Authoritative, expert technical analyst, slightly opinionated, highly professional. Write as if you are a real person sharing your daily thoughts with your subscribers. Use native crypto slang (adapted to Ukrainian: e.g. "дамп", "памп", "ведмежка", "буллран", "корекція", "ікси/іксів" where appropriate) to make it feel natural and authoritative.
 3. Layout & Readability (CRITICAL):
    - Separate different sections using **bold headings** and empty lines.
    - Use a structured bulleted price list with emojis for coins (🪙, 📈 for positive, 📉 for negative change), e.g.:
@@ -200,12 +237,13 @@ def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str, sk
         
         selected_link = data.get("selected_link")
         post_text = data.get("post_text", "").strip()
+        poll = data.get("poll")
         
-        return selected_link, post_text
+        return selected_link, post_text, poll
         
     except Exception as e:
         logging.error(f"Error calling Gemini API for type {post_type}: {e}")
-        return None, ""
+        return None, "", None
 
 def generate_market_analysis(prices: dict, headlines: List[str]) -> str:
     """

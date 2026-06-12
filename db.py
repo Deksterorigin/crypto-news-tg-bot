@@ -75,24 +75,35 @@ def init_db():
             # Column already exists
             pass
 
-    # Populate default feeds if empty
+    # Populate default feeds if empty or missing
     default_feeds = [
         ("Cointelegraph", "https://cointelegraph.com/rss"),
         ("Decrypt", "https://decrypt.co/feed"),
         ("AirdropAlert", "https://airdropalert.com/feed/rssfeed"),
         ("Vitalik's Blog", "https://vitalik.ca/feed/"),
-        ("a16z Crypto", "https://a16zcrypto.substack.com/feed")
+        ("a16z Crypto", "https://a16zcrypto.substack.com/feed"),
+        ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml"),
+        ("Blockworks", "https://blockworks.co/feed"),
+        ("CryptoBriefing", "https://cryptobriefing.com/feed/"),
+        ("NewsBTC", "https://www.newsbtc.com/feed/"),
+        ("Bitcoin Magazine", "https://bitcoinmagazine.com/feed"),
+        ("CryptoRank DropHunting", "https://cryptorank.io/drophunting"),
+        ("Airdrops.io", "https://airdrops.io/"),
+        ("Binance Blog", "https://www.binance.com/en/blog"),
+        ("Bybit Blog", "https://announcements.bybit.com/en-US/"),
+        ("Coinbase Blog", "https://medium.com/feed/@coinbase")
     ]
     
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM rss_feeds")
-        if cursor.fetchone()[0] == 0:
-            conn.executemany(
-                "INSERT INTO rss_feeds (name, url) VALUES (?, ?)",
-                default_feeds
-            )
-            conn.commit()
+        for name, url in default_feeds:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM rss_feeds WHERE url = ?", (url,))
+            if cursor.fetchone()[0] == 0:
+                conn.execute(
+                    "INSERT INTO rss_feeds (name, url) VALUES (?, ?)",
+                    (name, url)
+                )
+        conn.commit()
             
     # Populate default channel if empty
     with get_connection() as conn:

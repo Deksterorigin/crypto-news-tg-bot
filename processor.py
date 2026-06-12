@@ -154,14 +154,58 @@ Guidelines:
 6. Do NOT include any JSON packaging. Output ONLY the raw post content ready to be sent to Telegram.
 """
 
-def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str, skip_dedup: bool = False) -> Tuple[str, str]:
+def clean_title_for_comparison(title: str) -> str:
+    """Strips common prefixes from titles to compare the core subjects of articles."""
+    title = title.lower()
+    prefixes = [
+        "airdrop:", "cryptorank drop:", "bybit announcement:", "coindesk:", 
+        "decrypt:", "newsbtc:", "new listing:", "announcement:", "listing:"
+    ]
+    for p in prefixes:
+        if title.startswith(p):
+            title = title[len(p):].strip()
+    return title
+
+def get_clean_tokens(title: str) -> set:
+    """Tokenizes and stems (prefixes) words, ignoring stopwords, after cleaning prefixes."""
+    import re
+    title = clean_title_for_comparison(title)
+    title = re.sub(r'[^a-z0-9\s]', ' ', title)
+    words = title.split()
+    
+    stopwords = {
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", 
+        "of", "with", "by", "about", "against", "out", "new", "today", "now",
+        "first", "after", "over", "under", "will", "is", "are", "was", "were",
+        "be", "been", "has", "have", "had", "do", "does", "did", "from", "into"
+    }
+    
+    tokens = set()
+    for w in words:
+        if w in stopwords or len(w) < 3:
+            continue
+        # Stemming: prefix of length 5
+        tokens.add(w[:5])
+    return tokens
+
+def jaccard_similarity(title1: str, title2: str) -> float:
+    """Calculates Jaccard similarity between two titles using token sets."""
+    tokens1 = get_clean_tokens(title1)
+    tokens2 = get_clean_tokens(title2)
+    if not tokens1 or not tokens2:
+        return 0.0
+    intersection = tokens1.intersection(tokens2)
+    union = tokens1.union(tokens2)
+    return len(intersection) / len(union)
+
+def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str, skip_dedup: bool = False) -> Tuple[str, str, Any]:
     """
     Sends a list of items to Gemini. Gemini selects the top item of the requested type (news/activity),
     translates/summarizes it, adds hashtags, and returns (selected_link, post_text).
     """
     if not items:
         logging.info("No items to process.")
-        return None, ""
+        return None, "", None
 
     # Fetch recent posted titles to prevent duplicates
     recent_titles = []
@@ -180,8 +224,13 @@ def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str, sk
             is_dup = False
             for r_title in recent_titles:
                 ratio = difflib.SequenceMatcher(None, title.lower(), r_title.lower()).ratio()
-                if ratio > 0.65:
-                    logging.info(f"Deduplication (Fast Filter): Skipping '{title}' due to similarity ({ratio:.2f}) with recently posted: '{r_title}'")
+                j_sim = jaccard_similarity(title, r_title)
+                
+                if ratio > 0.65 or j_sim > 0.35:
+                    logging.info(
+                        f"Deduplication (Fast Filter): Skipping '{title}' due to similarity "
+                        f"(SeqMatcher: {ratio:.2f}, Jaccard: {j_sim:.2f}) with recently posted: '{r_title}'"
+                    )
                     is_dup = True
                     break
             if not is_dup:

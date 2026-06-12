@@ -86,5 +86,23 @@ class TestNewFeatures(unittest.TestCase):
         analytics = get_channel_analytics(channel_id)
         self.assertEqual(analytics["current"], 1500)
 
+    def test_jaccard_similarity(self):
+        from processor import jaccard_similarity
+        
+        # Re-ordered title check
+        t1 = "SEC Approves Spot Ethereum ETF"
+        t2 = "Ethereum Spot ETFs Approved by SEC"
+        self.assertGreater(jaccard_similarity(t1, t2), 0.5)
+        
+        # Different prefixes check
+        t3 = "CryptoRank Drop: Ekiden"
+        t4 = "Airdrop: Ekiden"
+        self.assertEqual(jaccard_similarity(t3, t4), 1.0)
+        
+        # Non-duplicate check
+        t5 = "Bitcoin price hits all time high"
+        t6 = "Cardano launches new staking features"
+        self.assertLess(jaccard_similarity(t5, t6), 0.1)
+
 if __name__ == "__main__":
     unittest.main()

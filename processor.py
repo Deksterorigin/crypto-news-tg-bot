@@ -44,6 +44,8 @@ Guidelines:
      "post_text": ""
    }}
 """
+    else:  # activity
+        return f"""
 You are an expert web3 researcher and blogger who helps people make money in crypto.
 Your job is to read a list of crypto articles, select the SINGLE best actionable project or promotion (e.g., airdrops, testnets, whitelists, giveaways, exchange promotions like Kraken trade rewards), and write an engaging guide about how users can participate to earn completely in {LANG_NAME}.
 

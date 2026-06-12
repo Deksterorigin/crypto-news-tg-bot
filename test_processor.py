@@ -1,5 +1,5 @@
 from fetcher import fetch_all_new_items, extract_image_url
-from processor import generate_single_post
+from processor import generate_single_post_by_type
 import sys
 
 def main():
@@ -22,7 +22,7 @@ def main():
     for idx, item in enumerate(batch, 1):
         print(f"  {idx}. [{item['source']}] {item['title']}")
         
-    selected_link, post_text = generate_single_post(batch)
+    selected_link, post_text = generate_single_post_by_type(batch, "news")
     
     print("\n" + "=" * 20 + " GENERATED POST PREVIEW " + "=" * 20)
     if post_text:

@@ -6,11 +6,15 @@ import threading
 import os
 import requests
 from datetime import datetime, timedelta
+from functools import wraps
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from config import BOT_TOKEN, CHANNEL_ID
 from fetcher import fetch_all_new_items, extract_image_url
 from processor import generate_single_post_by_type, generate_market_analysis
-from db import mark_as_published, get_connection, add_rss_feed, delete_rss_feed, get_rss_feeds
+from db import (
+    mark_as_published, get_connection, add_rss_feed, delete_rss_feed, get_rss_feeds,
+    get_owner_id, set_owner_id, is_admin, add_admin, delete_admin, get_admins
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -24,6 +28,60 @@ scheduled_news = []          # Datetimes for News posts (6 per day)
 scheduled_activities = []    # Datetimes for Activity/Earning posts (4 per day)
 scheduled_analysis = []      # Datetime for Market Analysis column (1 per day)
 scheduled_date = None        # date object tracking the current day of the schedule
+
+# --- SECURITY DECORATORS ---
+
+def admin_only(func):
+    """Decorator to restrict commands to authorized admins and the owner."""
+    @wraps(func)
+    def wrapper(message, *args, **kwargs):
+        user_id = message.from_user.id
+        
+        # Bootstrap: if no owner exists, register the first user who messages the bot
+        if get_owner_id() is None:
+            set_owner_id(user_id)
+            bot.reply_to(
+                message, 
+                f"👑 <b>Вітаємо!</b>\nВи автоматично зареєстровані як <b>Власник</b> цього бота (Ваш ID: <code>{user_id}</code>).", 
+                parse_mode="HTML"
+            )
+            return func(message, *args, **kwargs)
+            
+        if is_admin(user_id):
+            return func(message, *args, **kwargs)
+        else:
+            bot.reply_to(
+                message, 
+                f"🔒 <b>Доступ обмежено.</b>\nВаш Telegram ID: <code>{user_id}</code>.\nПопросіть власника надати вам доступ.", 
+                parse_mode="HTML"
+            )
+    return wrapper
+
+def owner_only(func):
+    """Decorator to restrict commands strictly to the bot owner."""
+    @wraps(func)
+    def wrapper(message, *args, **kwargs):
+        user_id = message.from_user.id
+        
+        # Bootstrap: if no owner exists, register the first user
+        if get_owner_id() is None:
+            set_owner_id(user_id)
+            bot.reply_to(
+                message, 
+                f"👑 <b>Вітаємо!</b>\nВи автоматично зареєстровані як <b>Власник</b> цього бота (Ваш ID: <code>{user_id}</code>).", 
+                parse_mode="HTML"
+            )
+            return func(message, *args, **kwargs)
+            
+        if user_id == get_owner_id():
+            return func(message, *args, **kwargs)
+        else:
+            bot.reply_to(
+                message, 
+                "👑 Ця команда доступна тільки <b>Власнику</b> бота.", 
+                parse_mode="HTML"
+            )
+    return wrapper
 
 # --- RENDER.COM WEB SERVER & KEEP ALIVE LOGIC ---
 
@@ -40,7 +98,6 @@ class HealthCheckHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             
     def log_message(self, format, *args):
-        # Suppress logging of incoming health check pings to keep stdout logs clean
         pass
 
 def run_web_server():
@@ -77,7 +134,6 @@ def fetch_coingecko_prices() -> dict:
             return response.json()
     except Exception as e:
         logging.error(f"Error fetching CoinGecko prices: {e}")
-    # Return zeroed placeholders in case the free API is rate-limited
     return {
         "bitcoin": {"usd": 0.0, "usd_24h_change": 0.0},
         "ethereum": {"usd": 0.0, "usd_24h_change": 0.0},
@@ -117,7 +173,6 @@ def generate_daily_schedule():
         scheduled_activities = activity_times
         
         # 3. Market Analysis Column: 1 post (randomly between 11:00 AM and 1:00 PM)
-        # 11:00 AM is 660 mins from midnight, 1:00 PM is 780 mins from midnight
         analysis_offset = random.randint(660, 780)
         scheduled_analysis = [datetime.combine(today, datetime.min.time()) + timedelta(minutes=analysis_offset)]
         
@@ -129,9 +184,7 @@ def generate_daily_schedule():
         logging.info(f"  Analysis Column (1): {[t.strftime('%H:%M') for t in scheduled_analysis]}")
 
 def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
-    """
-    Executes a news or activity publishing cycle.
-    """
+    """Executes a news or activity publishing cycle."""
     logging.info(f"Running publish cycle for type: {post_type}")
     try:
         items = fetch_all_new_items()
@@ -159,7 +212,6 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
                 bot.send_message(chat_id=target, text=post_text, parse_mode="HTML", disable_web_page_preview=False)
                 logging.info(f"Text post for {post_type} published.")
                 
-            # If not in test mode, mark all fetched items as processed
             if not test_chat_id:
                 for item in items:
                     mark_as_published(item["link"], item["title"], item["source"])
@@ -169,7 +221,6 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
             if test_chat_id:
                 bot.send_message(test_chat_id, f"⚠️ Gemini відфільтрував усі новини як невідповідні для типу '{post_type}'.")
             
-            # Clean items list in SQLite even if skipped to keep feeds fresh
             if not test_chat_id:
                 for item in items:
                     mark_as_published(item["link"], item["title"], item["source"])
@@ -182,18 +233,13 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
         return False
 
 def run_market_analysis_cycle(test_chat_id=None) -> bool:
-    """
-    Executes a market analysis review. Fetches CoinGecko prices,
-    gets today's news headlines, and generates an analyst commentary.
-    """
+    """Executes a market analysis review column."""
     logging.info("Running market analysis cycle...")
     try:
-        # Fetch data
         prices = fetch_coingecko_prices()
         items = fetch_all_new_items()
         headlines = [item["title"] for item in items[:8]] if items else ["No major breaking news headlines reported today."]
         
-        # Generate post
         analysis_text = generate_market_analysis(prices, headlines)
         
         target = test_chat_id if test_chat_id else CHANNEL_ID
@@ -224,14 +270,12 @@ def scheduler_thread():
     global scheduled_news, scheduled_activities, scheduled_analysis, scheduled_date
     logging.info("Scheduler thread started.")
     
-    # Init schedule
     generate_daily_schedule()
     
     executed_news = set()
     executed_activities = set()
     executed_analysis = set()
     
-    # Mark past slots as executed on boot
     now = datetime.now()
     with schedule_lock:
         for t in scheduled_news:
@@ -249,7 +293,6 @@ def scheduler_thread():
             now = datetime.now()
             today = now.date()
             
-            # Check for new day
             if today != scheduled_date:
                 generate_daily_schedule()
                 executed_news.clear()
@@ -298,36 +341,68 @@ def scheduler_thread():
 
 @bot.message_handler(commands=["start", "help"])
 def handle_start(message):
+    user_id = message.from_user.id
+    owner_id = get_owner_id()
+    
+    # Bootstrap Owner
+    if owner_id is None:
+        set_owner_id(user_id)
+        owner_id = user_id
+        bot.reply_to(
+            message, 
+            f"👑 <b>Вітаємо!</b>\nВи автоматично зареєстровані як <b>Власник</b> цього бота (Ваш ID: <code>{user_id}</code>).", 
+            parse_mode="HTML"
+        )
+        
+    if not is_admin(user_id):
+        # Non-admin greeting
+        bot.reply_to(
+            message,
+            f"👋 <b>Привіт! Я Telegram-бот автопублікації крипто-новин.</b>\n\n"
+            f"🔒 Доступ до адмін-панелі обмежено.\n"
+            f"Ваш Telegram ID: <code>{user_id}</code>.\n"
+            f"Передайте цей ID власнику каналу для отримання доступу.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Admin Help
     help_text = (
-        "👋 <b>Привіт! Я про-версія Telegram-бота автопублікації крипто-новин та аналітики.</b>\n\n"
-        "Я підтримую динамічні джерела новин, 3 типи черг публікацій та ІІ-суммаризацію.\n\n"
+        "👋 <b>Панель Адміністратора (Crypto Publisher Bot v3):</b>\n\n"
         "📅 <b>Мій розклад:</b>\n"
-        "📰 Новини — 6 постів на день (авто-вибір)\n"
-        "🎁 Активності / Аірдропи — 4 пости на день\n"
-        "📊 Огляд ринку (Колонка аналітика) — 1 пост на день\n\n"
-        "📋 <b>Адміністрування джерел (RSS):</b>\n"
-        "/list_feeds — Показати всі активні RSS-джерела\n"
-        "/add_feed [Назва] [URL] — Додати нову RSS-ленту\n"
-        "/delete_feed [URL] — Видалити RSS-ленту\n\n"
-        "⏳ <b>Публікація вручну у канал:</b>\n"
-        "/publish_news — Опублікувати новину зараз\n"
-        "/publish_activity — Опублікувати активність зараз\n"
-        "/publish_analysis — Опублікувати аналіз ринку зараз\n\n"
-        "📝 <b>Тестування (в цей чат):</b>\n"
-        "/test_news — Тест новини\n"
-        "/test_activity — Тест активності\n"
-        "/test_analysis — Тест колонки аналітика\n"
+        "📰 Новини — 6 постів на день\n"
+        "🎁 Активності / Заробіток — 4 пости на день\n"
+        "📊 Огляд ринку (Аналітика) — 1 пост на день\n\n"
+        "📋 <b>Джерела новин (RSS):</b>\n"
+        "/list_feeds — Список джерел\n"
+        "/add_feed [Назва] [URL] — Додати нову RSS-стрічку\n"
+        "/delete_feed [URL] — Видалити RSS-стрічку\n\n"
+        "⏳ <b>Публікація в канал:</b>\n"
+        "/publish_news — Опублікувати новину\n"
+        "/publish_activity — Опублікувати активність\n"
+        "/publish_analysis — Опублікувати аналітику ринку\n\n"
+        "📝 <b>Тестування в цей чат:</b>\n"
+        "/test_news | /test_activity | /test_analysis\n"
         "/status — Переглянути розклад на сьогодні"
     )
+    
+    # Owner Only Help Extension
+    if user_id == owner_id:
+        help_text += (
+            "\n\n👑 <b>Команди Власника (керування доступом):</b>\n"
+            "/list_admins — Список адміністраторів\n"
+            "/add_admin [ID] [Опис] — Додати адміністратора\n"
+            "/delete_admin [ID] — Видалити адміністратора"
+        )
+        
     bot.reply_to(message, help_text, parse_mode="HTML")
 
 @bot.message_handler(commands=["status"])
+@admin_only
 def handle_status(message):
     global scheduled_news, scheduled_activities, scheduled_analysis, scheduled_date
     try:
         now = datetime.now()
-        
-        # Fetch stats
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM published_posts")
@@ -343,21 +418,84 @@ def handle_status(message):
             
         status_msg = (
             f"🤖 <b>Статус Crypto Publisher Bot (v3):</b>\n\n"
-            f"📊 Посилань в БД: <code>{db_count}</code> | Активних стрічок: <code>{feed_count}</code>\n"
+            f"📊 Посилань в БД: <code>{db_count}</code> | Джерел: <code>{feed_count}</code>\n"
             f"📢 ID каналу: <code>{CHANNEL_ID}</code>\n"
             f"📅 Розклад на сьогодні ({curr_date}):\n"
             f"📰 <b>Новини (6):</b> {news_str}\n"
             f"🎁 <b>Активності (4):</b> {act_str}\n"
             f"📊 <b>Аналітика (1):</b> {an_str}\n\n"
-            f"Поточний системний час: <code>{now.strftime('%H:%M:%S')}</code>"
+            f"Системний час: <code>{now.strftime('%H:%M:%S')}</code>"
         )
         bot.reply_to(message, status_msg, parse_mode="HTML")
     except Exception as e:
-        bot.reply_to(message, f"❌ Помилка статусу: {e}")
+        bot.reply_to(message, f"❌ Помилка: {e}")
 
-# --- RSS FEEDS DYNAMIC MANAGEMENT ---
+# --- OWNER ONLY: ADMIN CONTROL ---
+
+@bot.message_handler(commands=["list_admins"])
+@owner_only
+def handle_list_admins(message):
+    try:
+        admins = get_admins()
+        owner_id = get_owner_id()
+        
+        lines = [f"👑 <b>Власник:</b> <code>{owner_id}</code>"]
+        if admins:
+            lines.append("\n👥 <b>Адміністратори:</b>")
+            for idx, a in enumerate(admins, 1):
+                lines.append(f"{idx}. ID: <code>{a['user_id']}</code> | Опис: <b>{a['username']}</b>")
+        else:
+            lines.append("\n👥 Додаткових адміністраторів немає.")
+            
+        bot.reply_to(message, "\n".join(lines), parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка: {e}")
+
+@bot.message_handler(commands=["add_admin"])
+@owner_only
+def handle_add_admin(message):
+    try:
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 2:
+            bot.reply_to(message, "❌ Використання:\n`/add_admin Telegram_ID [Опис/Нікнейм]`", parse_mode="Markdown")
+            return
+        
+        target_id = int(parts[1].strip())
+        username = parts[2].strip() if len(parts) > 2 else ""
+        
+        if add_admin(target_id, username):
+            bot.reply_to(message, f"✅ Користувача <code>{target_id}</code> успішно додано до списку адміністраторів!", parse_mode="HTML")
+        else:
+            bot.reply_to(message, "❌ Не вдалося додати адміністратора.")
+    except ValueError:
+        bot.reply_to(message, "❌ Некоректний Telegram ID. Він повинен містити тільки цифри.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка: {e}")
+
+@bot.message_handler(commands=["delete_admin"])
+@owner_only
+def handle_delete_admin(message):
+    try:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            bot.reply_to(message, "❌ Використання:\n`/delete_admin Telegram_ID`", parse_mode="Markdown")
+            return
+            
+        target_id = int(parts[1].strip())
+        
+        if delete_admin(target_id):
+            bot.reply_to(message, f"✅ Адміністратора <code>{target_id}</code> видалено.", parse_mode="HTML")
+        else:
+            bot.reply_to(message, f"❌ Адміністратора з ID <code>{target_id}</code> не знайдено.", parse_mode="HTML")
+    except ValueError:
+        bot.reply_to(message, "❌ Некоректний Telegram ID. Він повинен містити тільки цифри.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка: {e}")
+
+# --- ADMIN ONLY: RSS FEEDS DYNAMIC MANAGEMENT ---
 
 @bot.message_handler(commands=["list_feeds"])
+@admin_only
 def handle_list_feeds(message):
     try:
         feeds = get_rss_feeds()
@@ -372,6 +510,7 @@ def handle_list_feeds(message):
         bot.reply_to(message, f"❌ Помилка: {e}")
 
 @bot.message_handler(commands=["add_feed"])
+@admin_only
 def handle_add_feed(message):
     try:
         parts = message.text.split(maxsplit=2)
@@ -389,6 +528,7 @@ def handle_add_feed(message):
         bot.reply_to(message, f"❌ Помилка: {e}")
 
 @bot.message_handler(commands=["delete_feed"])
+@admin_only
 def handle_delete_feed(message):
     try:
         parts = message.text.split(maxsplit=1)
@@ -404,42 +544,48 @@ def handle_delete_feed(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Помилка: {e}")
 
-# --- MANUAL PUBLISH TRIGGERS ---
+# --- ADMIN ONLY: MANUAL PUBLISH TRIGGERS ---
 
 @bot.message_handler(commands=["publish_news"])
+@admin_only
 def handle_publish_news(message):
     bot.reply_to(message, "⏳ Починаю збір та публікацію Новини в канал...")
     threading.Thread(target=run_publish_cycle_by_type, args=("news",), kwargs={"test_chat_id": None}).start()
 
 @bot.message_handler(commands=["publish_activity"])
+@admin_only
 def handle_publish_activity(message):
     bot.reply_to(message, "⏳ Починаю збір та публікацію Активності в канал...")
     threading.Thread(target=run_publish_cycle_by_type, args=("activity",), kwargs={"test_chat_id": None}).start()
 
 @bot.message_handler(commands=["publish_analysis"])
+@admin_only
 def handle_publish_analysis(message):
     bot.reply_to(message, "⏳ Починаю генерацію та публікацію Аналізу Ринку в канал...")
     threading.Thread(target=run_market_analysis_cycle, kwargs={"test_chat_id": None}).start()
 
-# --- TEST TRIGGERS (TO USER CHAT) ---
+# --- ADMIN ONLY: TEST TRIGGERS (TO USER CHAT) ---
 
 @bot.message_handler(commands=["test_news"])
+@admin_only
 def handle_test_news(message):
-    bot.reply_to(message, "⏳ Тест: Збір та підготовка новини (буде надіслано сюди, канал та БД не зміняться)...")
+    bot.reply_to(message, "⏳ Тест: Збір та підготовка новини (буде надіслано сюди)...")
     threading.Thread(target=run_publish_cycle_by_type, args=("news", message.chat.id)).start()
 
 @bot.message_handler(commands=["test_activity"])
+@admin_only
 def handle_test_activity(message):
-    bot.reply_to(message, "⏳ Тест: Збір та підготовка активності (буде надіслано сюди, канал та БД не зміняться)...")
+    bot.reply_to(message, "⏳ Тест: Збір та підготовка активності (буде надіслано сюди)...")
     threading.Thread(target=run_publish_cycle_by_type, args=("activity", message.chat.id)).start()
 
 @bot.message_handler(commands=["test_analysis"])
+@admin_only
 def handle_test_analysis(message):
-    bot.reply_to(message, "⏳ Тест: Збір ринкових даних та генерація аналітики (буде надіслано сюди, канал не зміниться)...")
-    threading.Thread(target=run_market_analysis_cycle, kwargs={"test_chat_id": message.chat.id}).start()
+    bot.reply_to(message, "⏳ Тест: Збір ринкових даних та аналітики (буде надіслано сюди)...")
+    threading.Thread(target=run_market_analysis_cycle, kwargs={"test_chat_id": message.chat.id)).start()
 
 if __name__ == "__main__":
-    logging.info("Starting bot services (v3 with Render support)...")
+    logging.info("Starting bot services (v3 with security and Render support)...")
     
     # 1. Start Web Server for Render Health Checks
     web_t = threading.Thread(target=run_web_server, daemon=True)

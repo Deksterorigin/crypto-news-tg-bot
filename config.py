@@ -12,6 +12,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 POST_LANGUAGE = os.getenv("POST_LANGUAGE", "uk")
+OWNER_ID = os.getenv("OWNER_ID")
 
 # Ensure required configurations are present
 if not BOT_TOKEN:

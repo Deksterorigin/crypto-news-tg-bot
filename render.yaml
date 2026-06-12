@@ -12,5 +12,7 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
+      - key: OWNER_ID
+        sync: false
       - key: POST_LANGUAGE
         value: uk

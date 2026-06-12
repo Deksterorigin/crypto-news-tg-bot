@@ -3,7 +3,10 @@ import time
 import random
 import logging
 import threading
+import os
+import requests
 from datetime import datetime, timedelta
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 from config import BOT_TOKEN, CHANNEL_ID
 from fetcher import fetch_all_new_items, extract_image_url
 from processor import generate_single_post
@@ -19,6 +22,50 @@ bot = telebot.TeleBot(BOT_TOKEN)
 schedule_lock = threading.Lock()
 scheduled_times = []      # List of datetime objects for today's postings
 scheduled_date = None      # date object tracking the current day of the schedule
+
+# --- RENDER.COM WEB SERVER & KEEP ALIVE LOGIC ---
+
+class HealthCheckHandler(SimpleHTTPRequestHandler):
+    """Minimal HTTP handler to pass Render's health checks."""
+    def do_GET(self):
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(b"Crypto Publisher Bot is running!")
+        else:
+            self.send_response(404)
+            self.end_headers()
+            
+    def log_message(self, format, *args):
+        # Suppress logging of incoming health check pings to keep stdout logs clean
+        pass
+
+def run_web_server():
+    """Runs a web server to bind to Render's port for health check verification."""
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logging.info(f"Web server started on port {port} for Render health checks.")
+    server.serve_forever()
+
+def keep_alive_thread():
+    """Periodically pings the Render app's public URL to prevent it from sleeping."""
+    url = os.getenv("RENDER_EXTERNAL_URL")
+    if not url:
+        logging.info("RENDER_EXTERNAL_URL is not set. Self-pinging keep-alive is disabled.")
+        return
+        
+    logging.info(f"Self-pinging keep-alive loop started for: {url}")
+    while True:
+        try:
+            # Render free tier sleeps after 15 mins of inactivity. Ping every 10 minutes.
+            time.sleep(600)
+            response = requests.get(url)
+            logging.info(f"Self-ping sent to {url}, response status: {response.status_code}")
+        except Exception as e:
+            logging.error(f"Error in self-ping loop: {e}")
+
+# --- SCHEDULER & PUBLISHING LOGIC ---
 
 def generate_daily_schedule():
     """
@@ -303,13 +350,21 @@ def handle_test(message):
     threading.Thread(target=worker).start()
 
 if __name__ == "__main__":
-    logging.info("Starting bot services (v2)...")
+    logging.info("Starting bot services (v2 with Render support)...")
     
-    # 1. Start background scheduler thread
+    # 1. Start Web Server for Render Health Checks
+    web_t = threading.Thread(target=run_web_server, daemon=True)
+    web_t.start()
+    
+    # 2. Start Self-pinging keep-alive loop to prevent sleeping
+    ping_t = threading.Thread(target=keep_alive_thread, daemon=True)
+    ping_t.start()
+    
+    # 3. Start background scheduler thread
     sched_t = threading.Thread(target=scheduler_thread, daemon=True)
     sched_t.start()
     
-    # 2. Start telegram bot polling
+    # 4. Start telegram bot polling
     logging.info("Telegram Bot starts polling...")
     try:
         bot.infinity_polling()

@@ -13,7 +13,8 @@ from fetcher import fetch_all_new_items, extract_image_url
 from processor import generate_single_post_by_type, generate_market_analysis
 from db import (
     mark_as_published, get_connection, add_rss_feed, delete_rss_feed, get_rss_feeds,
-    get_owner_id, set_owner_id, is_admin, add_admin, delete_admin, get_admins
+    get_owner_id, set_owner_id, is_admin, add_admin, delete_admin, get_admins,
+    get_setting, set_setting, get_channels, add_channel, delete_channel
 )
 
 # Configure logging
@@ -24,9 +25,9 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 # Thread-safe locks and global state
 schedule_lock = threading.Lock()
-scheduled_news = []          # Datetimes for News posts (6 per day)
-scheduled_activities = []    # Datetimes for Activity/Earning posts (4 per day)
-scheduled_analysis = []      # Datetime for Market Analysis column (1 per day)
+scheduled_news = []          # Datetimes for News posts
+scheduled_activities = []    # Datetimes for Activity/Earning posts
+scheduled_analysis = []      # Datetime for Market Analysis column
 scheduled_date = None        # date object tracking the current day of the schedule
 
 # --- SECURITY DECORATORS ---
@@ -37,7 +38,7 @@ def admin_only(func):
     def wrapper(message, *args, **kwargs):
         user_id = message.from_user.id
         
-        # Bootstrap: if no owner exists, register the first user who messages the bot
+        # Bootstrap: if no owner exists, register the first user
         if get_owner_id() is None:
             set_owner_id(user_id)
             bot.reply_to(
@@ -63,7 +64,6 @@ def owner_only(func):
     def wrapper(message, *args, **kwargs):
         user_id = message.from_user.id
         
-        # Bootstrap: if no owner exists, register the first user
         if get_owner_id() is None:
             set_owner_id(user_id)
             bot.reply_to(
@@ -144,47 +144,55 @@ def fetch_coingecko_prices() -> dict:
 
 def generate_daily_schedule():
     """
-    Generates 3 independent schedules: 6 News posts, 4 Activity posts,
-    and 1 Market Analysis column randomly placed in the 10:00 - 22:00 window.
+    Generates schedules dynamically based on settings in SQLite database.
+    Window boundaries and counts are fully customized.
     """
     global scheduled_news, scheduled_activities, scheduled_analysis, scheduled_date
     with schedule_lock:
         now = datetime.now()
         today = now.date()
         
-        # 10:00 AM to 10:00 PM is 12 hours = 720 minutes.
+        # Load dynamic configurations (with default Fallbacks)
+        news_count = int(get_setting("news_count", "6"))
+        activity_count = int(get_setting("activity_count", "4"))
+        start_hour = int(get_setting("start_hour", "10"))
+        end_hour = int(get_setting("end_hour", "22"))
         
-        # 1. News Queue: 6 posts (spaced out in 2-hour segments)
+        # Calculate window boundary minutes
+        window_minutes = (end_hour - start_hour) * 60
+        start_offset = start_hour * 60
+        
+        # 1. News Queue
         news_times = []
-        news_segment = 720.0 / 6
-        for i in range(6):
+        news_segment = float(window_minutes) / news_count
+        for i in range(news_count):
             offset = random.randint(int(i * news_segment), int((i + 1) * news_segment) - 1)
-            news_times.append(datetime.combine(today, datetime.min.time()) + timedelta(minutes=600 + offset))
+            news_times.append(datetime.combine(today, datetime.min.time()) + timedelta(minutes=start_offset + offset))
         news_times.sort()
         scheduled_news = news_times
         
-        # 2. Activity Queue: 4 posts (spaced out in 3-hour segments)
+        # 2. Activity Queue
         activity_times = []
-        activity_segment = 720.0 / 4
-        for i in range(4):
+        activity_segment = float(window_minutes) / activity_count
+        for i in range(activity_count):
             offset = random.randint(int(i * activity_segment), int((i + 1) * activity_segment) - 1)
-            activity_times.append(datetime.combine(today, datetime.min.time()) + timedelta(minutes=600 + offset))
+            activity_times.append(datetime.combine(today, datetime.min.time()) + timedelta(minutes=start_offset + offset))
         activity_times.sort()
         scheduled_activities = activity_times
         
-        # 3. Market Analysis Column: 1 post (randomly between 11:00 AM and 1:00 PM)
-        analysis_offset = random.randint(660, 780)
+        # 3. Market Analysis: 1 post (randomly in the first 2 hours of the starting hour)
+        analysis_offset = random.randint(start_offset + 60, start_offset + 180)
         scheduled_analysis = [datetime.combine(today, datetime.min.time()) + timedelta(minutes=analysis_offset)]
         
         scheduled_date = today
         
-        logging.info(f"Daily schedules generated for {today}:")
-        logging.info(f"  News Queue (6): {[t.strftime('%H:%M') for t in scheduled_news]}")
-        logging.info(f"  Activity Queue (4): {[t.strftime('%H:%M') for t in scheduled_activities]}")
+        logging.info(f"Daily schedules generated dynamically for {today}:")
+        logging.info(f"  News Queue ({news_count}): {[t.strftime('%H:%M') for t in scheduled_news]}")
+        logging.info(f"  Activity Queue ({activity_count}): {[t.strftime('%H:%M') for t in scheduled_activities]}")
         logging.info(f"  Analysis Column (1): {[t.strftime('%H:%M') for t in scheduled_analysis]}")
 
 def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
-    """Executes a news or activity publishing cycle."""
+    """Executes a news or activity publishing cycle, posting to all registered channels."""
     logging.info(f"Running publish cycle for type: {post_type}")
     try:
         items = fetch_all_new_items()
@@ -196,21 +204,28 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
             
         selected_link, post_text = generate_single_post_by_type(items, post_type)
         
-        target = test_chat_id if test_chat_id else CHANNEL_ID
+        # Get target channels list from DB
+        channels = get_channels()
+        if not channels and not test_chat_id:
+            logging.warning("No channels configured in SQLite db. Skipping publication.")
+            return False
+            
+        targets = [test_chat_id] if test_chat_id else [ch["channel_id"] for ch in channels]
         
         if post_text and selected_link:
             img_url = extract_image_url(selected_link)
             
-            if img_url:
-                try:
-                    bot.send_photo(chat_id=target, photo=img_url, caption=post_text, parse_mode="HTML")
-                    logging.info(f"Photo post for {post_type} published.")
-                except Exception as pe:
-                    logging.error(f"Failed to post photo: {pe}. Falling back to text.")
+            for target in targets:
+                if img_url:
+                    try:
+                        bot.send_photo(chat_id=target, photo=img_url, caption=post_text, parse_mode="HTML")
+                        logging.info(f"Photo post for {post_type} published to {target}.")
+                    except Exception as pe:
+                        logging.error(f"Failed to post photo to {target}: {pe}. Falling back to text.")
+                        bot.send_message(chat_id=target, text=post_text, parse_mode="HTML", disable_web_page_preview=False)
+                else:
                     bot.send_message(chat_id=target, text=post_text, parse_mode="HTML", disable_web_page_preview=False)
-            else:
-                bot.send_message(chat_id=target, text=post_text, parse_mode="HTML", disable_web_page_preview=False)
-                logging.info(f"Text post for {post_type} published.")
+                    logging.info(f"Text post for {post_type} published to {target}.")
                 
             if not test_chat_id:
                 for item in items:
@@ -219,7 +234,7 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
         else:
             logging.info(f"No suitable post of type {post_type} selected.")
             if test_chat_id:
-                bot.send_message(test_chat_id, f"⚠️ Gemini відфільтрував усі новини як невідповідні для типу '{post_type}'.")
+                bot.send_message(test_chat_id, f"⚠️ Gemini не знайшов підходящих матеріалів для типу '{post_type}'.")
             
             if not test_chat_id:
                 for item in items:
@@ -233,7 +248,7 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
         return False
 
 def run_market_analysis_cycle(test_chat_id=None) -> bool:
-    """Executes a market analysis review column."""
+    """Executes a market analysis review, posting to all registered channels."""
     logging.info("Running market analysis cycle...")
     try:
         prices = fetch_coingecko_prices()
@@ -242,15 +257,21 @@ def run_market_analysis_cycle(test_chat_id=None) -> bool:
         
         analysis_text = generate_market_analysis(prices, headlines)
         
-        target = test_chat_id if test_chat_id else CHANNEL_ID
+        channels = get_channels()
+        if not channels and not test_chat_id:
+            logging.warning("No channels configured in SQLite. Skipping analysis.")
+            return False
+            
+        targets = [test_chat_id] if test_chat_id else [ch["channel_id"] for ch in channels]
         
         if analysis_text:
-            bot.send_message(
-                chat_id=target,
-                text=analysis_text,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
+            for target in targets:
+                bot.send_message(
+                    chat_id=target,
+                    text=analysis_text,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
+                )
             logging.info("Market analysis published successfully.")
             return True
         else:
@@ -337,7 +358,281 @@ def scheduler_thread():
             logging.error(f"Error in scheduler_thread: {e}")
             time.sleep(60)
 
-# --- TELEGRAM BOT COMMAND HANDLERS ---
+# --- KEYBOARD BUILDERS ---
+
+def main_menu_keyboard() -> telebot.types.ReplyKeyboardMarkup:
+    """Builds the persistent bottom reply menu for admins."""
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row("📊 Статус", "⚙️ Налаштування")
+    markup.row("📢 Канали", "🔗 RSS-Джерела")
+    markup.row("📝 Тест-Пости", "⏳ Опублікувати зараз")
+    return markup
+
+def get_settings_menu() -> tuple[str, telebot.types.InlineKeyboardMarkup]:
+    """Generates the settings panel and inline keyboard."""
+    news_count = get_setting("news_count", "6")
+    activity_count = get_setting("activity_count", "4")
+    start_hour = get_setting("start_hour", "10")
+    end_hour = get_setting("end_hour", "22")
+    
+    text = (
+        f"⚙️ <b>Налаштування розкладу публікацій:</b>\n\n"
+        f"📰 Кількість новин на день: <b>{news_count}</b>\n"
+        f"🎁 Кількість активностей на день: <b>{activity_count}</b>\n"
+        f"⏰ Активне вікно: з <b>{start_hour}:00</b> до <b>{end_hour}:00</b>\n\n"
+        f"<i>Зміни будуть застосовані при генерації розкладу на наступний день, або ви можете примусово перегенерувати розклад командою /regenerate.</i>"
+    )
+    
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton("📰 Змінити к-ть новин", callback_data="set_news_count"),
+        telebot.types.InlineKeyboardButton("🎁 Змінити к-ть активностей", callback_data="set_act_count")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("⏰ Початок вікна (год)", callback_data="set_start_hour"),
+        telebot.types.InlineKeyboardButton("⏰ Кінець вікна (год)", callback_data="set_end_hour")
+    )
+    return text, markup
+
+def get_channels_menu() -> tuple[str, telebot.types.InlineKeyboardMarkup]:
+    """Generates the target channels panel and inline keyboard."""
+    channels = get_channels()
+    if not channels:
+        text = "📢 <b>Канали для публікації:</b>\n\n📭 Немає підключених каналів! Додайте хоча б один канал, щоб бот міг туди писати."
+    else:
+        lines = []
+        for idx, ch in enumerate(channels, 1):
+            lines.append(f"{idx}. <b>{ch['name']}</b>\n   ID: <code>{ch['channel_id']}</code>")
+        text = "📢 <b>Підключені канали для публікації:</b>\n\n" + "\n\n".join(lines)
+        
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton("➕ Додати канал", callback_data="add_channel"),
+        telebot.types.InlineKeyboardButton("❌ Видалити канал", callback_data="delete_channel")
+    )
+    return text, markup
+
+def get_feeds_menu() -> tuple[str, telebot.types.InlineKeyboardMarkup]:
+    """Generates the RSS sources panel and inline keyboard."""
+    feeds = get_rss_feeds()
+    if not feeds:
+        text = "🔗 <b>Джерела RSS-стрічок:</b>\n\n📭 Немає підключених джерел."
+    else:
+        lines = []
+        for idx, f in enumerate(feeds, 1):
+            lines.append(f"{idx}. <b>{f['name']}</b>\n   <code>{f['url']}</code>")
+        text = "🔗 <b>Активні RSS-джерела:</b>\n\n" + "\n\n".join(lines)
+        
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton("➕ Додати джерело", callback_data="add_feed"),
+        telebot.types.InlineKeyboardButton("❌ Видалити джерело", callback_data="delete_feed")
+    )
+    return text, markup
+
+def get_test_menu() -> telebot.types.InlineKeyboardMarkup:
+    """Inline menu to trigger dry-run test posts."""
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton("📰 Тест Новини", callback_data="t_news"),
+        telebot.types.InlineKeyboardButton("🎁 Тест Активності", callback_data="t_activity")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("📊 Тест Аналітики", callback_data="t_analysis")
+    )
+    return markup
+
+def get_publish_menu() -> telebot.types.InlineKeyboardMarkup:
+    """Inline menu to trigger live channel publications."""
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton("📰 Опубл. Новину", callback_data="p_news"),
+        telebot.types.InlineKeyboardButton("🎁 Опубл. Активність", callback_data="p_activity")
+    )
+    markup.add(
+        telebot.types.InlineKeyboardButton("📊 Опубл. Аналітику", callback_data="p_analysis")
+    )
+    return markup
+
+# --- TELEGRAM BOT DYNAMIC DIALOG FLOWS (register_next_step_handler) ---
+
+def process_set_news_count(message):
+    try:
+        val = int(message.text.strip())
+        if val <= 0 or val > 30:
+            raise ValueError
+        set_setting("news_count", str(val))
+        bot.send_message(message.chat.id, f"✅ Кількість новин успішно змінена на <b>{val}</b> на день!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Помилка. Введіть позитивне число (від 1 до 30):")
+        bot.register_next_step_handler(message, process_set_news_count)
+
+def process_set_act_count(message):
+    try:
+        val = int(message.text.strip())
+        if val <= 0 or val > 20:
+            raise ValueError
+        set_setting("activity_count", str(val))
+        bot.send_message(message.chat.id, f"✅ Кількість активнотей успішно змінена на <b>{val}</b> на день!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Помилка. Введіть позитивне число (від 1 до 20):")
+        bot.register_next_step_handler(message, process_set_act_count)
+
+def process_set_start_hour(message):
+    try:
+        val = int(message.text.strip())
+        end_h = int(get_setting("end_hour", "22"))
+        if val < 0 or val >= end_h or val > 23:
+            raise ValueError
+        set_setting("start_hour", str(val))
+        bot.send_message(message.chat.id, f"✅ Початок активного вікна змінено на <b>{val}:00</b>!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+    except ValueError:
+        bot.send_message(message.chat.id, f"❌ Помилка. Введіть годину від 0 до {int(get_setting('end_hour', '22'))-1}:")
+        bot.register_next_step_handler(message, process_set_start_hour)
+
+def process_set_end_hour(message):
+    try:
+        val = int(message.text.strip())
+        start_h = int(get_setting("start_hour", "10"))
+        if val <= start_h or val > 24:
+            raise ValueError
+        set_setting("end_hour", str(val))
+        bot.send_message(message.chat.id, f"✅ Кінець активного вікна змінено на <b>{val}:00</b>!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+    except ValueError:
+        bot.send_message(message.chat.id, f"❌ Помилка. Введіть годину від {int(get_setting('start_hour', '10'))+1} до 24:")
+        bot.register_next_step_handler(message, process_set_end_hour)
+
+def process_add_channel(message):
+    try:
+        text = message.text.strip()
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            bot.send_message(message.chat.id, "❌ Неправильний формат. Введіть ID та Назву через пробіл (наприклад: <code>-100123456789 КриптоКанал</code>):", parse_mode="HTML")
+            bot.register_next_step_handler(message, process_add_channel)
+            return
+            
+        ch_id = parts[0].strip()
+        name = parts[1].strip()
+        
+        if add_channel(ch_id, name):
+            bot.send_message(message.chat.id, f"✅ Канал <b>{name}</b> успішно додано!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+        else:
+            bot.send_message(message.chat.id, "❌ Не вдалося додати канал. Перевірте формат.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Помилка: {e}")
+
+def process_delete_channel(message):
+    ch_id = message.text.strip()
+    if delete_channel(ch_id):
+        bot.send_message(message.chat.id, f"✅ Канал з ID <code>{ch_id}</code> успішно видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard())
+    else:
+        bot.send_message(message.chat.id, f"❌ Канал з ID <code>{ch_id}</code> не знайдено в базі.", parse_mode="HTML")
+
+def process_add_feed(message):
+    try:
+        text = message.text.strip()
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            bot.send_message(message.chat.id, "❌ Неправильний формат. Введіть Назву та URL через пробіл (наприклад: <code>CoinDesk https://coindesk.com/arc/outboundfeed/rss/</code>):", parse_mode="HTML")
+            bot.register_next_step_handler(message, process_add_feed)
+            return
+            
+        name = parts[0].strip()
+        url = parts[1].strip()
+        
+        if add_rss_feed(name, url):
+            bot.send_message(message.chat.id, f"✅ Джерело <b>{name}</b> додано!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+        else:
+            bot.send_message(message.chat.id, "❌ Не вдалося додати джерело. Можливо, воно вже є.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Помилка: {e}")
+
+def process_delete_feed(message):
+    url = message.text.strip()
+    if delete_rss_feed(url):
+        bot.send_message(message.chat.id, f"✅ Джерело <code>{url}</code> видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard())
+    else:
+        bot.send_message(message.chat.id, f"❌ Джерело з адресою <code>{url}</code> не знайдено.", parse_mode="HTML")
+
+# --- CALLBACK QUERY HANDLER FOR INLINE BUTTONS ---
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_inline_callbacks(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "🔒 Доступ обмежено!", show_alert=True)
+        return
+        
+    action = call.data
+    chat_id = call.message.chat.id
+    
+    # Settings Modifications
+    if action == "set_news_count":
+        msg = bot.send_message(chat_id, "🔢 Введіть нову кількість новин на день (від 1 до 30):")
+        bot.register_next_step_handler(msg, process_set_news_count)
+        bot.answer_callback_query(call.id)
+    elif action == "set_act_count":
+        msg = bot.send_message(chat_id, "🔢 Введіть нову кількість активностей на день (від 1 to 20):")
+        bot.register_next_step_handler(msg, process_set_act_count)
+        bot.answer_callback_query(call.id)
+    elif action == "set_start_hour":
+        msg = bot.send_message(chat_id, "⏰ Введіть годину початку активного вікна (наприклад, 9):")
+        bot.register_next_step_handler(msg, process_set_start_hour)
+        bot.answer_callback_query(call.id)
+    elif action == "set_end_hour":
+        msg = bot.send_message(chat_id, "⏰ Введіть годину кінця активного вікна (наприклад, 23):")
+        bot.register_next_step_handler(msg, process_set_end_hour)
+        bot.answer_callback_query(call.id)
+        
+    # Channels Management
+    elif action == "add_channel":
+        msg = bot.send_message(chat_id, "📢 Введіть ID та Назву каналу через пробіл (наприклад: <code>-1001668264285 МійКанал</code>):", parse_mode="HTML")
+        bot.register_next_step_handler(msg, process_add_channel)
+        bot.answer_callback_query(call.id)
+    elif action == "delete_channel":
+        msg = bot.send_message(chat_id, "❌ Введіть точний ID каналу, який потрібно видалити:")
+        bot.register_next_step_handler(msg, process_delete_channel)
+        bot.answer_callback_query(call.id)
+        
+    # Feeds Management
+    elif action == "add_feed":
+        msg = bot.send_message(chat_id, "🔗 Введіть Назву та URL RSS-ленти через пробіл (наприклад: <code>CoinDesk https://coindesk.com/arc/outboundfeed/rss/</code>):", parse_mode="HTML")
+        bot.register_next_step_handler(msg, process_add_feed)
+        bot.answer_callback_query(call.id)
+    elif action == "delete_feed":
+        msg = bot.send_message(chat_id, "❌ Введіть точний URL джерела, яке потрібно видалити:")
+        bot.register_next_step_handler(msg, process_delete_feed)
+        bot.answer_callback_query(call.id)
+        
+    # Test Actions (Dry Run)
+    elif action == "t_news":
+        bot.send_message(chat_id, "⏳ Тест: Збір та підготовка новини...")
+        threading.Thread(target=run_publish_cycle_by_type, args=("news", chat_id)).start()
+        bot.answer_callback_query(call.id)
+    elif action == "t_activity":
+        bot.send_message(chat_id, "⏳ Тест: Збір та підготовка активності...")
+        threading.Thread(target=run_publish_cycle_by_type, args=("activity", chat_id)).start()
+        bot.answer_callback_query(call.id)
+    elif action == "t_analysis":
+        bot.send_message(chat_id, "⏳ Тест: Збір ринкових даних та аналітики...")
+        threading.Thread(target=run_market_analysis_cycle, kwargs={"test_chat_id": chat_id}).start()
+        bot.answer_callback_query(call.id)
+        
+    # Force Publish Actions (Live)
+    elif action == "p_news":
+        bot.send_message(chat_id, "⏳ Публікація Новини у канали...")
+        threading.Thread(target=run_publish_cycle_by_type, args=("news",), kwargs={"test_chat_id": None}).start()
+        bot.answer_callback_query(call.id)
+    elif action == "p_activity":
+        bot.send_message(chat_id, "⏳ Публікація Активності у канали...")
+        threading.Thread(target=run_publish_cycle_by_type, args=("activity",), kwargs={"test_chat_id": None}).start()
+        bot.answer_callback_query(call.id)
+    elif action == "p_analysis":
+        bot.send_message(chat_id, "⏳ Публікація Аналізу Ринку у канали...")
+        threading.Thread(target=run_market_analysis_cycle, kwargs={"test_chat_id": None}).start()
+        bot.answer_callback_query(call.id)
+
+# --- REPLY KEYBOARD COMMAND HANDLERS ---
 
 @bot.message_handler(commands=["start", "help"])
 def handle_start(message):
@@ -348,14 +643,14 @@ def handle_start(message):
     if owner_id is None:
         set_owner_id(user_id)
         owner_id = user_id
-        bot.reply_to(
-            message, 
+        bot.send_message(
+            message.chat.id, 
             f"👑 <b>Вітаємо!</b>\nВи автоматично зареєстровані як <b>Власник</b> цього бота (Ваш ID: <code>{user_id}</code>).", 
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard()
         )
         
     if not is_admin(user_id):
-        # Non-admin greeting
         bot.reply_to(
             message,
             f"👋 <b>Привіт! Я Telegram-бот автопублікації крипто-новин.</b>\n\n"
@@ -368,224 +663,89 @@ def handle_start(message):
 
     # Admin Help
     help_text = (
-        "👋 <b>Панель Адміністратора (Crypto Publisher Bot v3):</b>\n\n"
-        "📅 <b>Мій розклад:</b>\n"
-        "📰 Новини — 6 постів на день\n"
-        "🎁 Активності / Заробіток — 4 пости на день\n"
-        "📊 Огляд ринку (Аналітика) — 1 пост на день\n\n"
-        "📋 <b>Джерела новин (RSS):</b>\n"
-        "/list_feeds — Список джерел\n"
-        "/add_feed [Назва] [URL] — Додати нову RSS-стрічку\n"
-        "/delete_feed [URL] — Видалити RSS-стрічку\n\n"
-        "⏳ <b>Публікація в канал:</b>\n"
-        "/publish_news — Опублікувати новину\n"
-        "/publish_activity — Опублікувати активність\n"
-        "/publish_analysis — Опублікувати аналітику ринку\n\n"
-        "📝 <b>Тестування в цей чат:</b>\n"
-        "/test_news | /test_activity | /test_analysis\n"
-        "/status — Переглянути розклад на сьогодні"
+        "👋 <b>Панель Адміністратора (v3.2):</b>\n\n"
+        "Використовуйте кнопки меню нижче для управління каналами, RSS-стрічками, розкладом та публікаціями.\n\n"
+        "👑 <b>Команди Власника:</b>\n"
+        "/list_admins — Список адміністраторів\n"
+        "/add_admin [ID] [Нікнейм] — Додати адміністратора\n"
+        "/delete_admin [ID] — Видалити адміністратора\n"
+        "/regenerate — Примусово перегенерувати розклад на сьогодні за поточними налаштуваннями"
     )
+    bot.send_message(message.chat.id, help_text, parse_mode="HTML", reply_markup=main_menu_keyboard())
+
+@bot.message_handler(commands=["regenerate"])
+@admin_only
+def handle_regenerate(message):
+    generate_daily_schedule()
+    bot.reply_to(message, "🔄 Розклад на сьогодні успішно перегенеровано на основі актуальних налаштувань!")
+
+# Map Text Buttons
+@bot.message_handler(func=lambda message: message.text in ["📊 Статус", "⚙️ Налаштування", "📢 Канали", "🔗 RSS-Джерела", "📝 Тест-Пости", "⏳ Опублікувати зараз"])
+@admin_only
+def handle_menu_buttons(message):
+    btn_text = message.text
     
-    # Owner Only Help Extension
-    if user_id == owner_id:
-        help_text += (
-            "\n\n👑 <b>Команди Власника (керування доступом):</b>\n"
-            "/list_admins — Список адміністраторів\n"
-            "/add_admin [ID] [Опис] — Додати адміністратора\n"
-            "/delete_admin [ID] — Видалити адміністратора"
+    if btn_text == "📊 Статус":
+        handle_status(message)
+        
+    elif btn_text == "⚙️ Налаштування":
+        text, markup = get_settings_menu()
+        bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+        
+    elif btn_text == "📢 Канали":
+        text, markup = get_channels_menu()
+        bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+        
+    elif btn_text == "🔗 RSS-Джерела":
+        text, markup = get_feeds_menu()
+        bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+        
+    elif btn_text == "📝 Тест-Пости":
+        bot.send_message(
+            message.chat.id, 
+            "📝 <b>Оберіть тип тестової публікації:</b>\n(Пост прийде сюди у чат без відправки в канали та запису в БД)",
+            parse_mode="HTML",
+            reply_markup=get_test_menu()
         )
         
-    bot.reply_to(message, help_text, parse_mode="HTML")
+    elif btn_text == "⏳ Опублікувати зараз":
+        bot.send_message(
+            message.chat.id, 
+            "⏳ <b>Оберіть тип примусової публікації у канали:</b>",
+            parse_mode="HTML",
+            reply_markup=get_publish_menu()
+        )
 
+# Fallback direct commands (keep them active for compatibility)
 @bot.message_handler(commands=["status"])
 @admin_only
-def handle_status(message):
-    global scheduled_news, scheduled_activities, scheduled_analysis, scheduled_date
-    try:
-        now = datetime.now()
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM published_posts")
-            db_count = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM rss_feeds")
-            feed_count = cursor.fetchone()[0]
-            
-        with schedule_lock:
-            news_str = ", ".join([f"{t.strftime('%H:%M')}{'✓' if t in scheduled_news and t < now else ''}" for t in scheduled_news])
-            act_str = ", ".join([f"{t.strftime('%H:%M')}{'✓' if t in scheduled_activities and t < now else ''}" for t in scheduled_activities])
-            an_str = ", ".join([f"{t.strftime('%H:%M')}{'✓' if t in scheduled_analysis and t < now else ''}" for t in scheduled_analysis])
-            curr_date = scheduled_date
-            
-        status_msg = (
-            f"🤖 <b>Статус Crypto Publisher Bot (v3):</b>\n\n"
-            f"📊 Посилань в БД: <code>{db_count}</code> | Джерел: <code>{feed_count}</code>\n"
-            f"📢 ID каналу: <code>{CHANNEL_ID}</code>\n"
-            f"📅 Розклад на сьогодні ({curr_date}):\n"
-            f"📰 <b>Новини (6):</b> {news_str}\n"
-            f"🎁 <b>Активності (4):</b> {act_str}\n"
-            f"📊 <b>Аналітика (1):</b> {an_str}\n\n"
-            f"Системний час: <code>{now.strftime('%H:%M:%S')}</code>"
-        )
-        bot.reply_to(message, status_msg, parse_mode="HTML")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {e}")
-
-# --- OWNER ONLY: ADMIN CONTROL ---
-
-@bot.message_handler(commands=["list_admins"])
-@owner_only
-def handle_list_admins(message):
-    try:
-        admins = get_admins()
-        owner_id = get_owner_id()
-        
-        lines = [f"👑 <b>Власник:</b> <code>{owner_id}</code>"]
-        if admins:
-            lines.append("\n👥 <b>Адміністратори:</b>")
-            for idx, a in enumerate(admins, 1):
-                lines.append(f"{idx}. ID: <code>{a['user_id']}</code> | Опис: <b>{a['username']}</b>")
-        else:
-            lines.append("\n👥 Додаткових адміністраторів немає.")
-            
-        bot.reply_to(message, "\n".join(lines), parse_mode="HTML")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {e}")
-
-@bot.message_handler(commands=["add_admin"])
-@owner_only
-def handle_add_admin(message):
-    try:
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 2:
-            bot.reply_to(message, "❌ Використання:\n`/add_admin Telegram_ID [Опис/Нікнейм]`", parse_mode="Markdown")
-            return
-        
-        target_id = int(parts[1].strip())
-        username = parts[2].strip() if len(parts) > 2 else ""
-        
-        if add_admin(target_id, username):
-            bot.reply_to(message, f"✅ Користувача <code>{target_id}</code> успішно додано до списку адміністраторів!", parse_mode="HTML")
-        else:
-            bot.reply_to(message, "❌ Не вдалося додати адміністратора.")
-    except ValueError:
-        bot.reply_to(message, "❌ Некоректний Telegram ID. Він повинен містити тільки цифри.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {e}")
-
-@bot.message_handler(commands=["delete_admin"])
-@owner_only
-def handle_delete_admin(message):
-    try:
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2:
-            bot.reply_to(message, "❌ Використання:\n`/delete_admin Telegram_ID`", parse_mode="Markdown")
-            return
-            
-        target_id = int(parts[1].strip())
-        
-        if delete_admin(target_id):
-            bot.reply_to(message, f"✅ Адміністратора <code>{target_id}</code> видалено.", parse_mode="HTML")
-        else:
-            bot.reply_to(message, f"❌ Адміністратора з ID <code>{target_id}</code> не знайдено.", parse_mode="HTML")
-    except ValueError:
-        bot.reply_to(message, "❌ Некоректний Telegram ID. Він повинен містити тільки цифри.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {e}")
-
-# --- ADMIN ONLY: RSS FEEDS DYNAMIC MANAGEMENT ---
+def handle_status_command(message):
+    handle_status(message)
 
 @bot.message_handler(commands=["list_feeds"])
 @admin_only
-def handle_list_feeds(message):
-    try:
-        feeds = get_rss_feeds()
-        if not feeds:
-            bot.reply_to(message, "📭 У базі даних немає підключених RSS-стрічок.")
-            return
-        lines = []
-        for idx, f in enumerate(feeds, 1):
-            lines.append(f"{idx}. <b>{f['name']}</b>\n   <code>{f['url']}</code>")
-        bot.reply_to(message, "📋 <b>Активні RSS-джерела:</b>\n\n" + "\n\n".join(lines), parse_mode="HTML")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {e}")
+def handle_list_feeds_command(message):
+    handle_list_feeds(message)
 
-@bot.message_handler(commands=["add_feed"])
-@admin_only
-def handle_add_feed(message):
-    try:
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 3:
-            bot.reply_to(message, "❌ Неправильний формат. Використання:\n`/add_feed Назва_Джерела URL_Стрічки`", parse_mode="Markdown")
-            return
-        name = parts[1].strip()
-        url = parts[2].strip()
-        
-        if add_rss_feed(name, url):
-            bot.reply_to(message, f"✅ Джерело <b>{name}</b> успішно додано до бази даних!", parse_mode="HTML")
-        else:
-            bot.reply_to(message, "❌ Не вдалося додати джерело (можливо, URL вже існує).")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {e}")
+# --- OWNER ONLY: ACCESS MANAGEMENT COMMANDS ---
 
-@bot.message_handler(commands=["delete_feed"])
-@admin_only
-def handle_delete_feed(message):
-    try:
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2:
-            bot.reply_to(message, "❌ Неправильний формат. Використання:\n`/delete_feed URL_Стрічки`", parse_mode="Markdown")
-            return
-        url = parts[1].strip()
-        
-        if delete_rss_feed(url):
-            bot.reply_to(message, "✅ Джерело успішно видалено з бази даних.")
-        else:
-            bot.reply_to(message, "❌ Джерело з таким URL не знайдено.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Помилка: {e}")
+@bot.message_handler(commands=["list_admins"])
+@owner_only
+def handle_list_admins_cmd(message):
+    handle_list_admins(message)
 
-# --- ADMIN ONLY: MANUAL PUBLISH TRIGGERS ---
+@bot.message_handler(commands=["add_admin"])
+@owner_only
+def handle_add_admin_cmd(message):
+    handle_add_admin(message)
 
-@bot.message_handler(commands=["publish_news"])
-@admin_only
-def handle_publish_news(message):
-    bot.reply_to(message, "⏳ Починаю збір та публікацію Новини в канал...")
-    threading.Thread(target=run_publish_cycle_by_type, args=("news",), kwargs={"test_chat_id": None}).start()
-
-@bot.message_handler(commands=["publish_activity"])
-@admin_only
-def handle_publish_activity(message):
-    bot.reply_to(message, "⏳ Починаю збір та публікацію Активності в канал...")
-    threading.Thread(target=run_publish_cycle_by_type, args=("activity",), kwargs={"test_chat_id": None}).start()
-
-@bot.message_handler(commands=["publish_analysis"])
-@admin_only
-def handle_publish_analysis(message):
-    bot.reply_to(message, "⏳ Починаю генерацію та публікацію Аналізу Ринку в канал...")
-    threading.Thread(target=run_market_analysis_cycle, kwargs={"test_chat_id": None}).start()
-
-# --- ADMIN ONLY: TEST TRIGGERS (TO USER CHAT) ---
-
-@bot.message_handler(commands=["test_news"])
-@admin_only
-def handle_test_news(message):
-    bot.reply_to(message, "⏳ Тест: Збір та підготовка новини (буде надіслано сюди)...")
-    threading.Thread(target=run_publish_cycle_by_type, args=("news", message.chat.id)).start()
-
-@bot.message_handler(commands=["test_activity"])
-@admin_only
-def handle_test_activity(message):
-    bot.reply_to(message, "⏳ Тест: Збір та підготовка активності (буде надіслано сюди)...")
-    threading.Thread(target=run_publish_cycle_by_type, args=("activity", message.chat.id)).start()
-
-@bot.message_handler(commands=["test_analysis"])
-@admin_only
-def handle_test_analysis(message):
-    bot.reply_to(message, "⏳ Тест: Збір ринкових даних та аналітики (буде надіслано сюди)...")
-    threading.Thread(target=run_market_analysis_cycle, kwargs={"test_chat_id": message.chat.id}).start()
+@bot.message_handler(commands=["delete_admin"])
+@owner_only
+def handle_delete_admin_cmd(message):
+    handle_delete_admin(message)
 
 if __name__ == "__main__":
-    logging.info("Starting bot services (v3 with security and Render support)...")
+    logging.info("Starting bot services (v3.2 with security, keyboards, and Render support)...")
     
     # 1. Start Web Server for Render Health Checks
     web_t = threading.Thread(target=run_web_server, daemon=True)

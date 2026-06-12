@@ -1,7 +1,7 @@
 import sqlite3
 import os
 from datetime import datetime
-from config import DB_PATH, os as config_os
+from config import DB_PATH, os as config_os, CHANNEL_ID as DEFAULT_CHANNEL_ID
 
 def get_connection():
     """Returns a connection to the SQLite database."""
@@ -46,6 +46,15 @@ def init_db():
                 value TEXT
             )
         """)
+        
+        # Create channels table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS channels (
+                channel_id TEXT PRIMARY KEY,
+                name TEXT,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.commit()
 
     # Populate default feeds if empty
@@ -64,6 +73,17 @@ def init_db():
             conn.executemany(
                 "INSERT INTO rss_feeds (name, url) VALUES (?, ?)",
                 default_feeds
+            )
+            conn.commit()
+            
+    # Populate default channel if empty
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM channels")
+        if cursor.fetchone()[0] == 0 and DEFAULT_CHANNEL_ID:
+            conn.execute(
+                "INSERT INTO channels (channel_id, name) VALUES (?, ?)",
+                (str(DEFAULT_CHANNEL_ID), "Основний канал")
             )
             conn.commit()
 
@@ -137,6 +157,63 @@ def get_admins() -> list:
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, username, added_at FROM admins")
         return [dict(row) for row in cursor.fetchall()]
+
+# --- GENERIC SETTINGS DYNAMIC MANAGEMENT ---
+
+def get_setting(key: str, default: str = "") -> str:
+    """Gets a setting value from SQLite by key."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        return row[0] if row else default
+
+def set_setting(key: str, value: str):
+    """Saves or updates a setting key-value pair in SQLite."""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (key, str(value))
+        )
+        conn.commit()
+
+# --- CHANNELS DYNAMIC MANAGEMENT ---
+
+def get_channels() -> list:
+    """Returns a list of all Telegram channels where the bot posts."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT channel_id, name, added_at FROM channels")
+        return [dict(row) for row in cursor.fetchall()]
+
+def add_channel(channel_id: str, name: str) -> bool:
+    """Adds a target Telegram channel. Returns True if successful."""
+    try:
+        # Standardize channel ID (usually starts with -100)
+        ch_id = channel_id.strip()
+        if not ch_id.startswith("-") and not ch_id.startswith("@"):
+            ch_id = "-100" + ch_id
+            
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO channels (channel_id, name) VALUES (?, ?)",
+                (ch_id, name)
+            )
+            conn.commit()
+        return True
+    except Exception:
+        return False
+
+def delete_channel(channel_id: str) -> bool:
+    """Removes a target Telegram channel. Returns True if successful."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id.strip(),))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception:
+        return False
 
 # --- FEED & POSTS MANAGEMENT ---
 

@@ -48,17 +48,28 @@ Your job is to read a list of crypto articles, select the SINGLE best actionable
 
 Guidelines:
 1. Written entirely in {LANG_NAME}.
-2. Tone: Enthusiastic, clear, step-by-step. Focus on the earning potential.
-3. The post must be strictly under 800 characters (including HTML tags, emojis, and hashtags) so it fits as a photo caption.
-4. Include:
-   - A bolded title with an emoji (e.g. "🎁 <b>Airdrop від Linea</b>" or "💰 <b>Промо від Kraken: Зароби $10</b>").
-   - A brief summary of the activity and what they need to do (2-3 sentences max).
-   - A direct action link: `<a href="LINK">Брати участь</a>`.
-   - 3-5 relevant hashtags at the very end (e.g. `#аірдроп #активність #заробіток`).
-5. Output format: You must respond ONLY with a valid JSON object. Do NOT wrap in markdown code blocks like ```json ... ```. The JSON must contain exactly these two keys:
+2. Tone: Enthusiastic, encouraging, clear, and step-by-step. Focus on the earning potential!
+3. Style & Readability:
+   - Use bold text for headers and key requirements.
+   - Format steps as numbered items using emojis (e.g., 1️⃣, 2️⃣, 3️⃣).
+   - Use bullet points and empty lines to separate blocks of text so it's very easy to scan on mobile.
+4. The post must be strictly under 850 characters (including HTML tags, emojis, and hashtags) so it fits as a photo caption.
+5. Example structure:
+   🎁 <b>Airdrop від Linea</b>
+   
+   Опис проекту коротко. Чому це вигідно та скільки можна заробити.
+   
+   📋 <b>Кроки для участі:</b>
+   1️⃣ Перейдіть на сайт...
+   2️⃣ Зробіть мінт...
+   
+   🔗 <a href="LINK">Брати участь тут</a>
+   
+   #аірдроп #крипта #заробіток
+6. Output format: You must respond ONLY with a valid JSON object. Do NOT wrap in markdown code blocks like ```json ... ```. The JSON must contain exactly these two keys:
    - "selected_link": The exact URL string of the article you chose.
    - "post_text": The complete HTML-formatted post text.
-6. If the input list is empty or no good activities found, return:
+7. If the input list is empty or no good activities found, return:
    {{
      "selected_link": null,
      "post_text": ""
@@ -73,13 +84,21 @@ Your task is to write a highly convincing, human-like market analysis post in {L
 Guidelines:
 1. Written entirely in {LANG_NAME}.
 2. Tone: Authoritative, expert technical analyst, slightly opinionated, highly professional. Write as if you are a real person sharing your daily thoughts with your subscribers.
-3. The post must be under 1800 characters. Use bold headings, clean paragraphs, and bullet points.
-4. Include:
-   - Current market state using the provided price data (BTC, ETH, SOL and their 24h change).
-   - Analysis of current market sentiment, connecting it to the provided recent news headlines.
-   - Your personal analyst opinion/outlook for the next few days.
+3. Layout & Readability (CRITICAL):
+   - Separate different sections using **bold headings** and empty lines.
+   - Use a structured bulleted price list with emojis for coins (🪙, 📈 for positive, 📉 for negative change), e.g.:
+     🪙 <b>Bitcoin (BTC):</b> $67,500 (<i>+2.45%</i>)
+     🪙 <b>Ethereum (ETH):</b> $3,500 (<i>-1.12%</i>)
+   - Do NOT write giant walls of text. Keep paragraphs to 2-3 sentences maximum.
+   - Use rich emojis strategically (📊, 🧠, 💡, ⚡, 📉, 📈) to make it visually scanning and premium.
+4. Structure:
+   - <b>Daily Market Analysis Header</b> (e.g., "📊 <b>Огляд ринку: Оцінка ситуації та аналітика</b>")
+   - <b>Price review section</b> (BTC, ETH, SOL with their 24h change).
+   - 🧠 <b>Аналіз новин та настроїв</b>: Connect current prices to the provided news headlines (why is it growing or falling?).
+   - 💡 <b>Думка аналітика / Прогноз</b>: Share your personal analyst opinion on what happens next.
    - Standard disclaimer at the end in italics: "<i>Не є фінансовою порадою.</i>"
-5. Do NOT include any JSON packaging. Output ONLY the raw post content ready to be sent to Telegram.
+5. The post must be under 1800 characters.
+6. Do NOT include any JSON packaging. Output ONLY the raw post content ready to be sent to Telegram.
 """
 
 def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str) -> Tuple[str, str]:

@@ -102,10 +102,13 @@ class HealthCheckHandler(SimpleHTTPRequestHandler):
 
 def run_web_server():
     """Runs a web server to bind to Render's port for health check verification."""
-    port = int(os.getenv("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    logging.info(f"Web server started on port {port} for Render health checks.")
-    server.serve_forever()
+    try:
+        port = int(os.getenv("PORT", 10000))
+        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+        logging.info(f"Web server started on port {port} for Render health checks.")
+        server.serve_forever()
+    except Exception as e:
+        logging.error(f"Error starting health check web server: {e}")
 
 def keep_alive_thread():
     """Periodically pings the Render app's public URL to prevent it from sleeping."""
@@ -614,7 +617,17 @@ def get_publish_menu() -> telebot.types.InlineKeyboardMarkup:
 
 # --- TELEGRAM BOT DYNAMIC DIALOG FLOWS (register_next_step_handler) ---
 
+def check_cancel_command(message) -> bool:
+    """If message is a command, clears step handler, re-processes the command, and returns True."""
+    if message.text and message.text.startswith("/"):
+        bot.clear_step_handler_by_chat_id(chat_id=message.chat.id)
+        bot.process_new_messages([message])
+        return True
+    return False
+
 def process_set_news_count(message):
+    if check_cancel_command(message):
+        return
     try:
         val = int(message.text.strip())
         if val <= 0 or val > 30:
@@ -626,6 +639,8 @@ def process_set_news_count(message):
         bot.register_next_step_handler(message, process_set_news_count)
 
 def process_set_act_count(message):
+    if check_cancel_command(message):
+        return
     try:
         val = int(message.text.strip())
         if val <= 0 or val > 20:
@@ -637,6 +652,8 @@ def process_set_act_count(message):
         bot.register_next_step_handler(message, process_set_act_count)
 
 def process_set_start_hour(message):
+    if check_cancel_command(message):
+        return
     try:
         val = int(message.text.strip())
         end_h = int(get_setting("end_hour", "22"))
@@ -649,6 +666,8 @@ def process_set_start_hour(message):
         bot.register_next_step_handler(message, process_set_start_hour)
 
 def process_set_end_hour(message):
+    if check_cancel_command(message):
+        return
     try:
         val = int(message.text.strip())
         start_h = int(get_setting("start_hour", "10"))
@@ -661,6 +680,8 @@ def process_set_end_hour(message):
         bot.register_next_step_handler(message, process_set_end_hour)
 
 def process_add_channel(message):
+    if check_cancel_command(message):
+        return
     try:
         text = message.text.strip()
         parts = text.split(maxsplit=1)
@@ -680,6 +701,8 @@ def process_add_channel(message):
         bot.send_message(message.chat.id, f"❌ Помилка: {e}")
 
 def process_delete_channel(message):
+    if check_cancel_command(message):
+        return
     ch_id = message.text.strip()
     if delete_channel(ch_id):
         bot.send_message(message.chat.id, f"✅ Канал з ID <code>{ch_id}</code> успішно видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard())
@@ -687,6 +710,8 @@ def process_delete_channel(message):
         bot.send_message(message.chat.id, f"❌ Канал з ID <code>{ch_id}</code> не знайдено в базі.", parse_mode="HTML")
 
 def process_add_feed(message):
+    if check_cancel_command(message):
+        return
     try:
         text = message.text.strip()
         parts = text.split(maxsplit=1)
@@ -706,6 +731,8 @@ def process_add_feed(message):
         bot.send_message(message.chat.id, f"❌ Помилка: {e}")
 
 def process_delete_feed(message):
+    if check_cancel_command(message):
+        return
     url = message.text.strip()
     if delete_rss_feed(url):
         bot.send_message(message.chat.id, f"✅ Джерело <code>{url}</code> видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard())
@@ -713,16 +740,22 @@ def process_delete_feed(message):
         bot.send_message(message.chat.id, f"❌ Джерело з адресою <code>{url}</code> не знайдено.", parse_mode="HTML")
 
 def process_edit_blacklist(message):
+    if check_cancel_command(message):
+        return
     val = message.text.strip()
     set_setting("blacklist_words", val)
     bot.send_message(message.chat.id, "✅ Чорний список слів успішно оновлено!", reply_markup=main_menu_keyboard())
 
 def process_edit_breaking(message):
+    if check_cancel_command(message):
+        return
     val = message.text.strip()
     set_setting("breaking_keywords", val)
     bot.send_message(message.chat.id, "✅ Ключові слова для Breaking News успішно оновлено!", reply_markup=main_menu_keyboard())
 
 def process_edit_proxies(message):
+    if check_cancel_command(message):
+        return
     val = message.text.strip()
     if val.lower() in ["none", "empty", "очистити", "-", "видалити"]:
         val = ""

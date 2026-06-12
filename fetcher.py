@@ -14,6 +14,23 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 # Feeds are loaded dynamically from the SQLite database
 
+MONTHS_MAP = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
+}
+
+def parse_english_date(date_str: str):
+    """Parses date string like 'Jun 11, 2026' into a date object, independent of system locale."""
+    parts = [p.strip().replace(",", "") for p in date_str.split() if p.strip()]
+    if len(parts) == 3:
+        month_str = parts[0].lower()[:3]
+        day = int(parts[1])
+        year = int(parts[2])
+        if month_str in MONTHS_MAP:
+            from datetime import date
+            return date(year, MONTHS_MAP[month_str], day)
+    raise ValueError(f"Cannot parse date: {date_str}")
+
 def extract_image_url(article_url: str) -> str:
     """Scrapes the article page to find the Open Graph og:image URL."""
     try:
@@ -205,7 +222,7 @@ def fetch_feed(source_name: str, feed_url: str) -> List[Dict[str, Any]]:
                     if date_match:
                         date_str = date_match.group(0)
                         try:
-                            ann_date = datetime.strptime(date_str, "%b %d, %Y").date()
+                            ann_date = parse_english_date(date_str)
                             berlin_today = get_berlin_now().date()
                             if (berlin_today - ann_date).days > 1:
                                 logging.info(f"Skipping old Bybit article: '{full_text[:50]}...' (date: {date_str})")

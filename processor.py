@@ -240,7 +240,7 @@ def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str, sk
 
     if not filtered_items:
         logging.info("All items filtered out as duplicates.")
-        return None, ""
+        return None, "", None
         
     logging.info(f"Processing {len(filtered_items)} items (after filtering out duplicates) to select top {post_type} post...")
     

@@ -4,9 +4,13 @@ from datetime import datetime
 from config import DB_PATH, os as config_os, CHANNEL_ID as DEFAULT_CHANNEL_ID, get_berlin_now
 
 def get_connection():
-    """Returns a connection to the SQLite database."""
-    conn = sqlite3.connect(DB_PATH)
+    """Returns a connection to the SQLite database with WAL mode and timeout set."""
+    conn = sqlite3.connect(DB_PATH, timeout=20.0)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+    except Exception:
+        pass
     return conn
 
 def init_db():

@@ -1,6 +1,7 @@
 import google.generativeai as genai
 import logging
 import json
+import difflib
 from typing import List, Dict, Any, Tuple
 from config import GEMINI_API_KEY, POST_LANGUAGE
 
@@ -25,6 +26,9 @@ Your job is to read a list of crypto articles, select the SINGLE most important,
 
 CRITICAL REQUIREMENT:
 Even though the input articles are in English, the generated Telegram post must be written 100% in {LANG_NAME}. You must translate the content. Do NOT output any English text in the post body, headers, or hashtags (except proper names of tokens or protocols like BTC, Linea, Binance).
+
+CRITICAL DEDUPLICATION REQUIREMENT:
+If the user provides a "recently_published_titles" list, you MUST NOT select any article that covers the same event, story, news, or announcement as any of those recently published titles. We want 100% unique news and absolutely no repeated topics!
 
 Guidelines:
 1. Written entirely in {LANG_NAME}.
@@ -51,6 +55,9 @@ Your job is to read a list of crypto articles, select the SINGLE best actionable
 
 CRITICAL REQUIREMENT:
 Even though the input articles are in English, the generated Telegram post must be written 100% in {LANG_NAME}. You must translate the content. Do NOT output any English text in the post body, headers, or hashtags (except proper names of tokens or protocols like BTC, Linea, Binance).
+
+CRITICAL DEDUPLICATION REQUIREMENT:
+If the user provides a "recently_published_titles" list, you MUST NOT select any article that covers the same project promotion, airdrop, or earning campaign as any of those recently published titles. We want unique earning opportunities!
 
 Guidelines:
 1. Written entirely in {LANG_NAME}.
@@ -110,7 +117,7 @@ Guidelines:
 6. Do NOT include any JSON packaging. Output ONLY the raw post content ready to be sent to Telegram.
 """
 
-def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str) -> Tuple[str, str]:
+def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str, skip_dedup: bool = False) -> Tuple[str, str]:
     """
     Sends a list of items to Gemini. Gemini selects the top item of the requested type (news/activity),
     translates/summarizes it, adds hashtags, and returns (selected_link, post_text).
@@ -118,12 +125,42 @@ def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str) ->
     if not items:
         logging.info("No items to process.")
         return None, ""
+
+    # Fetch recent posted titles to prevent duplicates
+    recent_titles = []
+    if not skip_dedup:
+        try:
+            from db import get_recent_posted_titles
+            recent_titles = get_recent_posted_titles(days=7)
+        except Exception as e:
+            logging.error(f"Error fetching recent posted titles for deduplication: {e}")
+
+    # 1. Filter out items that have very similar titles to recently posted ones (Fast filter)
+    filtered_items = []
+    if not skip_dedup and recent_titles:
+        for item in items:
+            title = item["title"]
+            is_dup = False
+            for r_title in recent_titles:
+                ratio = difflib.SequenceMatcher(None, title.lower(), r_title.lower()).ratio()
+                if ratio > 0.65:
+                    logging.info(f"Deduplication (Fast Filter): Skipping '{title}' due to similarity ({ratio:.2f}) with recently posted: '{r_title}'")
+                    is_dup = True
+                    break
+            if not is_dup:
+                filtered_items.append(item)
+    else:
+        filtered_items = items
+
+    if not filtered_items:
+        logging.info("All items filtered out as duplicates.")
+        return None, ""
         
-    logging.info(f"Processing {len(items)} items to select top {post_type} post...")
+    logging.info(f"Processing {len(filtered_items)} items (after filtering out duplicates) to select top {post_type} post...")
     
     # Prepare payload
     payload = []
-    for item in items:
+    for item in filtered_items:
         payload.append({
             "source": item["source"],
             "title": item["title"],
@@ -131,7 +168,18 @@ def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str) ->
             "link": item["link"]
         })
         
-    prompt = f"Here is the list of fetched crypto items. Select the best '{post_type}' post:\n\n{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    # Build prompt and instruct Gemini to check semantic duplication against recent titles
+    prompt_data = {
+        "items_to_select_from": payload
+    }
+    if not skip_dedup and recent_titles:
+        prompt_data["recently_published_titles"] = recent_titles[:30]
+        
+    prompt = (
+        f"Select the best single '{post_type}' post from the items_to_select_from list.\n"
+        f"Here is the data (including items and recently published titles):\n\n"
+        f"{json.dumps(prompt_data, ensure_ascii=False, indent=2)}"
+    )
     
     try:
         model = genai.GenerativeModel(

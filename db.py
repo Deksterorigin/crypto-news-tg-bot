@@ -56,6 +56,14 @@ def init_db():
             )
         """)
         conn.commit()
+        
+        # Migration: Check if was_posted column exists in published_posts table, if not add it
+        try:
+            conn.execute("ALTER TABLE published_posts ADD COLUMN was_posted INTEGER DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
 
     # Populate default feeds if empty
     default_feeds = [
@@ -255,14 +263,24 @@ def is_already_published(url: str) -> bool:
         cursor.execute("SELECT 1 FROM published_posts WHERE url = ?", (url,))
         return cursor.fetchone() is not None
 
-def mark_as_published(url: str, title: str, source: str):
-    """Marks a URL as published to prevent posting it again."""
+def mark_as_published(url: str, title: str, source: str, was_posted: int = 0):
+    """Marks a URL as processed, optionally specifying if it was actually posted."""
     with get_connection() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO published_posts (url, title, source) VALUES (?, ?, ?)",
-            (url, title, source)
+            "INSERT OR REPLACE INTO published_posts (url, title, source, was_posted) VALUES (?, ?, ?, ?)",
+            (url, title, source, was_posted)
         )
         conn.commit()
+
+def get_recent_posted_titles(days: int = 7) -> list:
+    """Returns a list of titles of posts that were actually published (was_posted=1) in the last N days."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT title FROM published_posts WHERE was_posted = 1 AND published_at >= datetime('now', ?)",
+            (f"-{days} days",)
+        )
+        return [row[0] for row in cursor.fetchall() if row[0]]
 
 # Automatically initialize database when the module is imported
 init_db()

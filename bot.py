@@ -202,7 +202,7 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
                 bot.send_message(test_chat_id, "❌ Не знайдено нових матеріалів для сбору.")
             return False
             
-        selected_link, post_text = generate_single_post_by_type(items, post_type)
+        selected_link, post_text = generate_single_post_by_type(items, post_type, skip_dedup=(test_chat_id is not None))
         
         # Get target channels list from DB
         channels = get_channels()
@@ -228,8 +228,13 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
                     logging.info(f"Text post for {post_type} published to {target}.")
                 
             if not test_chat_id:
+                # Mark all items as processed (not posted)
                 for item in items:
-                    mark_as_published(item["link"], item["title"], item["source"])
+                    mark_as_published(item["link"], item["title"], item["source"], was_posted=0)
+                # Mark the chosen item as actually posted
+                selected_item = next((i for i in items if i["link"] == selected_link), None)
+                if selected_item:
+                    mark_as_published(selected_item["link"], selected_item["title"], selected_item["source"], was_posted=1)
             return True
         else:
             logging.info(f"No suitable post of type {post_type} selected.")
@@ -237,8 +242,9 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
                 bot.send_message(test_chat_id, f"⚠️ Gemini не знайшов підходящих матеріалів для типу '{post_type}'.")
             
             if not test_chat_id:
+                # Mark all items as processed (none of them were posted)
                 for item in items:
-                    mark_as_published(item["link"], item["title"], item["source"])
+                    mark_as_published(item["link"], item["title"], item["source"], was_posted=0)
             return False
             
     except Exception as e:

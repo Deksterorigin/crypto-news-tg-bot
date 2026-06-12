@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from datetime import datetime
 
 # Base directory of the project
 BASE_DIR = Path(__file__).resolve().parent
@@ -64,3 +65,13 @@ def requests_get_with_retry(url: str, headers: dict = None, timeout: int = 5) ->
     # Final fallback: direct connection
     logging.info(f"All proxies failed. Falling back to direct connection for {url}")
     return requests.get(url, headers=headers, timeout=timeout)
+
+def get_berlin_now() -> datetime:
+    """Returns the current naive datetime in Europe/Berlin timezone."""
+    from zoneinfo import ZoneInfo
+    try:
+        return datetime.now(ZoneInfo("Europe/Berlin")).replace(tzinfo=None)
+    except Exception:
+        # Fallback to local time in case of zoneinfo issues
+        from datetime import datetime as dt
+        return dt.now()

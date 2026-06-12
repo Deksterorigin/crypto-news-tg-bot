@@ -8,7 +8,7 @@ import requests
 from datetime import datetime, timedelta
 from functools import wraps
 from http.server import SimpleHTTPRequestHandler, HTTPServer
-from config import BOT_TOKEN, CHANNEL_ID
+from config import BOT_TOKEN, CHANNEL_ID, get_berlin_now
 from fetcher import fetch_all_new_items, extract_image_url
 from processor import generate_single_post_by_type, generate_market_analysis
 from db import (
@@ -149,7 +149,7 @@ def generate_daily_schedule():
     """
     global scheduled_news, scheduled_activities, scheduled_analysis, scheduled_date
     with schedule_lock:
-        now = datetime.now()
+        now = get_berlin_now()
         today = now.date()
         
         # Load dynamic configurations (with default Fallbacks)
@@ -327,7 +327,7 @@ def scheduler_thread():
     executed_activities = set()
     executed_analysis = set()
     
-    now = datetime.now()
+    now = get_berlin_now()
     with schedule_lock:
         for t in scheduled_news:
             if t < now:
@@ -341,7 +341,7 @@ def scheduler_thread():
                 
     while True:
         try:
-            now = datetime.now()
+            now = get_berlin_now()
             today = now.date()
             
             if today != scheduled_date:
@@ -1006,7 +1006,7 @@ def handle_menu_buttons(message):
 def handle_status(message):
     global scheduled_news, scheduled_activities, scheduled_analysis, scheduled_date
     try:
-        now = datetime.now()
+        now = get_berlin_now()
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM published_posts")

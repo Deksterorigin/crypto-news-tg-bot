@@ -1,7 +1,7 @@
 import sqlite3
 import os
 from datetime import datetime
-from config import DB_PATH, os as config_os, CHANNEL_ID as DEFAULT_CHANNEL_ID
+from config import DB_PATH, os as config_os, CHANNEL_ID as DEFAULT_CHANNEL_ID, get_berlin_now
 
 def get_connection():
     """Returns a connection to the SQLite database."""
@@ -319,7 +319,7 @@ def get_recent_posted_titles(days: int = 7) -> list:
 
 def record_channel_stats(channel_id: str, member_count: int):
     """Records the subscriber count for a channel for the current day."""
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = get_berlin_now().strftime("%Y-%m-%d")
     with get_connection() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO channel_stats (channel_id, date, member_count) VALUES (?, ?, ?)",

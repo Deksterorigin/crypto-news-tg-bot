@@ -771,6 +771,25 @@ def handle_add_admin_cmd(message):
 def handle_delete_admin_cmd(message):
     handle_delete_admin(message)
 
+@bot.message_handler(commands=["backup_db"])
+@owner_only
+def handle_backup_db(message):
+    try:
+        from config import DB_PATH
+        if os.path.exists(DB_PATH):
+            with open(DB_PATH, "rb") as db_file:
+                bot.send_document(
+                    chat_id=message.chat.id,
+                    document=db_file,
+                    visible_file_name="data.db",
+                    caption="📦 <b>Резервна копія бази даних SQLite (data.db)</b>",
+                    parse_mode="HTML"
+                )
+        else:
+            bot.reply_to(message, "❌ Файл бази даних не знайдено.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Помилка при створенні бекапу: {e}")
+
 if __name__ == "__main__":
     logging.info("Starting bot services (v3.2 with security, keyboards, and Render support)...")
     

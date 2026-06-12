@@ -1,9 +1,13 @@
 import feedparser
 import logging
+import calendar
+import time
+import re
+from datetime import datetime
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
 from db import is_already_published, get_setting
-from config import requests_get_with_retry
+from config import requests_get_with_retry, get_berlin_now
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -91,6 +95,17 @@ def fetch_feed(source_name: str, feed_url: str) -> List[Dict[str, Any]]:
                     if is_already_published(link):
                         continue
                         
+                    # Check age: news must not be older than 24 hours (86,400 seconds)
+                    pub_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+                    if pub_parsed:
+                        try:
+                            pub_ts = calendar.timegm(pub_parsed)
+                            if time.time() - pub_ts > 86400:
+                                logging.info(f"Skipping old Binance entry: '{title}' (age: {int((time.time() - pub_ts)/3600)}h)")
+                                continue
+                        except Exception as e:
+                            logging.warning(f"Error checking age for Binance entry {title}: {e}")
+                            
                     items.append({
                         "title": title,
                         "link": link,
@@ -181,7 +196,27 @@ def fetch_feed(source_name: str, feed_url: str) -> List[Dict[str, Any]]:
                     full_url = href
                     if href.startswith("/"):
                         full_url = "https://announcements.bybit.com" + href
-                    title = a.get_text(strip=True)
+                    
+                    full_text = a.get_text(strip=True)
+                    
+                    # Extract date using regex (e.g. "Jun 11, 2026")
+                    date_match = re.search(r'([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{4})', full_text)
+                    is_old = False
+                    if date_match:
+                        date_str = date_match.group(0)
+                        try:
+                            ann_date = datetime.strptime(date_str, "%b %d, %Y").date()
+                            berlin_today = get_berlin_now().date()
+                            if (berlin_today - ann_date).days > 1:
+                                logging.info(f"Skipping old Bybit article: '{full_text[:50]}...' (date: {date_str})")
+                                is_old = True
+                        except Exception as de:
+                            logging.warning(f"Error parsing Bybit date {date_str}: {de}")
+                            
+                    if is_old:
+                        continue
+                        
+                    title = full_text
                     if "lg..." in title:
                         title = title.split("lg...")[0].strip()
                     if title and len(title) > 2:
@@ -224,6 +259,17 @@ def fetch_feed(source_name: str, feed_url: str) -> List[Dict[str, Any]]:
             if is_already_published(link):
                 continue
                 
+            # Check age: news must not be older than 24 hours (86,400 seconds)
+            pub_parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+            if pub_parsed:
+                try:
+                    pub_ts = calendar.timegm(pub_parsed)
+                    if time.time() - pub_ts > 86400:
+                        logging.info(f"Skipping old RSS entry: '{title}' (age: {int((time.time() - pub_ts)/3600)}h)")
+                        continue
+                except Exception as e:
+                    logging.warning(f"Error checking age for entry {title}: {e}")
+                    
             items.append({
                 "title": title,
                 "link": link,

@@ -323,3 +323,36 @@ def generate_market_analysis(prices: dict, headlines: List[str]) -> str:
     except Exception as e:
         logging.error(f"Error generating market analysis: {e}")
         return ""
+
+def is_news_highly_urgent(title: str, summary: str) -> bool:
+    """Uses Gemini to check if a news item is truly urgent breaking news (market-moving, major exploit, etc.)."""
+    prompt = (
+        f"Analyze the following cryptocurrency news item:\n"
+        f"Title: {title}\n"
+        f"Summary: {summary}\n\n"
+        f"Is this news item a highly urgent, critical, or market-moving breaking news event "
+        f"(e.g., a major hack over $1M, SEC/regulatory milestone approval/ban, exchange bankruptcy, "
+        f"systemic liquidity crisis, or critical protocol exploit)?\n"
+        f"Minor updates, standard interviews, or small hacks should be marked as false.\n"
+        f"Respond with a valid JSON object containing exactly:\n"
+        f"{{\n"
+        f"  \"is_really_urgent\": true/false\n"
+        f"}}\n"
+    )
+    try:
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash"
+        )
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0.0,
+                "response_mime_type": "application/json"
+            }
+        )
+        data = json.loads(response.text.strip())
+        return data.get("is_really_urgent", False)
+    except Exception as e:
+        logging.error(f"Error validating breaking news urgency: {e}")
+        # Default fallback to True if validation fails to not miss actual breaking news
+        return True

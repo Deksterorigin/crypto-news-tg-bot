@@ -104,5 +104,89 @@ class TestNewFeatures(unittest.TestCase):
         t6 = "Cardano launches new staking features"
         self.assertLess(jaccard_similarity(t5, t6), 0.1)
 
+    def test_rss_age_filter(self):
+        import email.utils
+        import time
+        
+        pub_date_new = email.utils.formatdate(time.time() - 3600)  # 1 hour ago
+        pub_date_old = email.utils.formatdate(time.time() - 48 * 3600)  # 48 hours ago
+        
+        mock_feed_content = f"""<?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0">
+            <channel>
+                <title>Test Feed</title>
+                <link>http://test.com</link>
+                <description>Test Description</description>
+                <item>
+                    <title>New Bitcoin News</title>
+                    <link>http://test.com/new</link>
+                    <description>New description</description>
+                    <pubDate>{pub_date_new}</pubDate>
+                </item>
+                <item>
+                    <title>Old Bitcoin News</title>
+                    <link>http://test.com/old</link>
+                    <description>Old description</description>
+                    <pubDate>{pub_date_old}</pubDate>
+                </item>
+            </channel>
+        </rss>
+        """.encode('utf-8')
+        
+        with patch('fetcher.requests_get_with_retry') as mock_get:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.content = mock_feed_content
+            mock_get.return_value = mock_response
+            
+            # Clean database entries
+            from db import get_connection
+            with get_connection() as conn:
+                conn.execute("DELETE FROM published_posts WHERE url IN ('http://test.com/new', 'http://test.com/old')")
+                conn.commit()
+                
+            items = fetch_feed("Test Source", "http://test.com/feed")
+            
+            # Assertions
+            # The new item should be included, the old one (>24h) should be skipped
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["link"], "http://test.com/new")
+
+    def test_bybit_date_filter(self):
+        from datetime import timedelta
+        from config import get_berlin_now
+        
+        berlin_now = get_berlin_now()
+        today_str = berlin_now.strftime("%b %d, %Y")
+        old_date = berlin_now - timedelta(days=3)
+        old_str = old_date.strftime("%b %d, %Y")
+        
+        mock_bybit_html = f"""
+        <html>
+            <body>
+                <a href="/en/article/new-listing-xyz-blt1/">XYZ Listing lg...{today_str} New Listings</a>
+                <a href="/en/article/old-listing-abc-blt2/">ABC Listing lg...{old_str} New Listings</a>
+            </body>
+        </html>
+        """
+        
+        with patch('fetcher.requests_get_with_retry') as mock_get:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.text = mock_bybit_html
+            mock_get.return_value = mock_response
+            
+            # Clean database entries
+            from db import get_connection
+            with get_connection() as conn:
+                conn.execute("DELETE FROM published_posts WHERE url IN ('https://announcements.bybit.com/en/article/new-listing-xyz-blt1/', 'https://announcements.bybit.com/en/article/old-listing-abc-blt2/')")
+                conn.commit()
+                
+            items = fetch_feed("Bybit", "https://announcements.bybit.com/en-US/")
+            
+            # Assertions
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["link"], "https://announcements.bybit.com/en/article/new-listing-xyz-blt1/")
+
 if __name__ == "__main__":
     unittest.main()

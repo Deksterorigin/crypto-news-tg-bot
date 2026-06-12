@@ -409,56 +409,71 @@ def breaking_news_monitor_thread():
                         breaking_items.append(item)
                 
                 if breaking_items:
-                    logging.info(f"Found {len(breaking_items)} potential breaking news items.")
+                    logging.info(f"Found {len(breaking_items)} potential breaking news items based on keywords.")
+                    
+                    actual_breaking_items = []
+                    from processor import is_news_highly_urgent
+                    from db import is_already_published
+                    
                     for item in breaking_items:
-                        # Double check if it's already published
-                        from db import is_already_published
                         if is_already_published(item["link"]):
                             continue
-                        
-                        selected_link, post_text, poll = generate_single_post_by_type(breaking_items, "breaking", skip_dedup=False)
-                        
-                        if selected_link and post_text:
-                            channels = get_channels()
-                            targets = [ch["channel_id"] for ch in channels]
+                        # Verify using Gemini urgency filter
+                        if is_news_highly_urgent(item["title"], item["summary"]):
+                            logging.info(f"🚨 Verified highly urgent breaking news: '{item['title']}'")
+                            actual_breaking_items.append(item)
+                        else:
+                            logging.info(f"ℹ️ Item filtered out as not urgent enough for breaking news: '{item['title']}'")
+                    
+                    if actual_breaking_items:
+                        for item in actual_breaking_items:
+                            # Double check if it's already published
+                            if is_already_published(item["link"]):
+                                continue
                             
-                            if targets:
-                                img_url = extract_image_url(selected_link)
-                                for target in targets:
-                                    if img_url:
-                                        try:
-                                            bot.send_photo(chat_id=target, photo=img_url, caption=post_text, parse_mode="HTML")
-                                            logging.info(f"Breaking news photo post published to {target}")
-                                        except Exception as pe:
-                                            logging.error(f"Failed to post breaking photo to {target}: {pe}. Falling back to text.")
-                                            bot.send_message(chat_id=target, text=post_text, parse_mode="HTML", disable_web_page_preview=False)
-                                    else:
-                                        bot.send_message(chat_id=target, text=post_text, parse_mode="HTML", disable_web_page_preview=False)
-                                        logging.info(f"Breaking news text post published to {target}")
-                                    
-                                    # Send poll if present
-                                    if poll and isinstance(poll, dict):
-                                        try:
-                                            bot.send_poll(
-                                                chat_id=target,
-                                                question=poll.get("question")[:80],
-                                                options=[opt[:30] for opt in poll.get("options", [])],
-                                                is_anonymous=True
-                                            )
-                                            logging.info(f"Breaking news poll sent to {target}")
-                                        except Exception as pole:
-                                            logging.error(f"Failed to send poll for breaking news to {target}: {pole}")
-                                            
-                                # Mark the chosen item as actually posted
-                                selected_item = next((i for i in breaking_items if i["link"] == selected_link), None)
-                                if selected_item:
-                                    mark_as_published(selected_item["link"], selected_item["title"], selected_item["source"], was_posted=1)
+                            selected_link, post_text, poll = generate_single_post_by_type(actual_breaking_items, "breaking", skip_dedup=False)
+                            
+                            if selected_link and post_text:
+                                channels = get_channels()
+                                targets = [ch["channel_id"] for ch in channels]
                                 
-                                # Mark other breaking items we fetched as processed (not posted) so they don't spam
-                                for b_item in breaking_items:
-                                    if b_item["link"] != selected_link:
-                                        mark_as_published(b_item["link"], b_item["title"], b_item["source"], was_posted=0)
-                                break
+                                if targets:
+                                    img_url = extract_image_url(selected_link)
+                                    for target in targets:
+                                        if img_url:
+                                            try:
+                                                bot.send_photo(chat_id=target, photo=img_url, caption=post_text, parse_mode="HTML")
+                                                logging.info(f"Breaking news photo post published to {target}")
+                                            except Exception as pe:
+                                                logging.error(f"Failed to post breaking photo to {target}: {pe}. Falling back to text.")
+                                                bot.send_message(chat_id=target, text=post_text, parse_mode="HTML", disable_web_page_preview=False)
+                                        else:
+                                            bot.send_message(chat_id=target, text=post_text, parse_mode="HTML", disable_web_page_preview=False)
+                                            logging.info(f"Breaking news text post published to {target}")
+                                        
+                                        # Send poll if present
+                                        if poll and isinstance(poll, dict):
+                                            try:
+                                                bot.send_poll(
+                                                    chat_id=target,
+                                                    question=poll.get("question")[:80],
+                                                    options=[opt[:30] for opt in poll.get("options", [])],
+                                                    is_anonymous=True
+                                                )
+                                                logging.info(f"Breaking news poll sent to {target}")
+                                            except Exception as pole:
+                                                logging.error(f"Failed to send poll for breaking news to {target}: {pole}")
+                                                
+                                    # Mark the chosen item as actually posted
+                                    selected_item = next((i for i in actual_breaking_items if i["link"] == selected_link), None)
+                                    if selected_item:
+                                        mark_as_published(selected_item["link"], selected_item["title"], selected_item["source"], was_posted=1)
+                                    
+                                    # Mark other actual breaking items we fetched as processed (not posted) so they don't spam
+                                    for b_item in actual_breaking_items:
+                                        if b_item["link"] != selected_link:
+                                            mark_as_published(b_item["link"], b_item["title"], b_item["source"], was_posted=0)
+                                    break
             time.sleep(300)
         except Exception as e:
             logging.error(f"Error in breaking news monitor thread: {e}")

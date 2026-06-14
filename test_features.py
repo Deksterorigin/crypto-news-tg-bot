@@ -188,5 +188,64 @@ class TestNewFeatures(unittest.TestCase):
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0]["link"], "https://announcements.bybit.com/en/article/new-listing-xyz-blt1/")
 
+    def test_format_proxy(self):
+        from bot import format_proxy
+        self.assertEqual(format_proxy("1.2.3.4:8080"), "http://1.2.3.4:8080")
+        self.assertEqual(format_proxy("http://1.2.3.4:8080"), "http://1.2.3.4:8080")
+        self.assertEqual(format_proxy("https://1.2.3.4:8080"), "https://1.2.3.4:8080")
+        self.assertEqual(format_proxy("socks5://user:pass@1.2.3.4:8080"), "socks5://user:pass@1.2.3.4:8080")
+
+    @patch('bot.requests.get')
+    @patch('bot.bot.edit_message_text')
+    def test_check_proxies_job(self, mock_edit_msg, mock_get):
+        from bot import check_proxies_job
+        
+        # Mock successful check for one proxy, failure for another
+        mock_resp_success = MagicMock()
+        mock_resp_success.status_code = 200
+        
+        mock_get.side_effect = [mock_resp_success, Exception("Connection timeout")]
+        
+        proxies_list = ["1.2.3.4:8080", "http://5.6.7.8:8080"]
+        check_proxies_job(12345, 67890, proxies_list)
+        
+        self.assertTrue(mock_edit_msg.called)
+        final_call_args = mock_edit_msg.call_args[1]
+        self.assertIn("Результати перевірки проксі", final_call_args["text"])
+        self.assertIn("1.2.3.4:8080", final_call_args["text"])
+        self.assertIn("5.6.7.8:8080", final_call_args["text"])
+        self.assertIn("Працює: <b>1</b>", final_call_args["text"])
+
+    @patch('bot.add_admin')
+    @patch('bot.delete_admin')
+    @patch('bot.bot.send_message')
+    def test_admin_step_handlers(self, mock_send_msg, mock_delete_admin, mock_add_admin):
+        from bot import process_add_admin_btn, process_delete_admin_btn
+        
+        # Mock database actions
+        mock_add_admin.return_value = True
+        mock_delete_admin.return_value = True
+        
+        # Add admin test
+        mock_message_add = MagicMock()
+        mock_message_add.text = "987654321 test_user"
+        mock_message_add.chat.id = 12345
+        mock_message_add.from_user.id = 12345
+        
+        process_add_admin_btn(mock_message_add)
+        mock_add_admin.assert_called_with(987654321, "test_user")
+        self.assertTrue(mock_send_msg.called)
+        self.assertIn("успішно додано", mock_send_msg.call_args[0][1])
+        
+        # Delete admin test
+        mock_message_delete = MagicMock()
+        mock_message_delete.text = "987654321"
+        mock_message_delete.chat.id = 12345
+        mock_message_delete.from_user.id = 12345
+        
+        process_delete_admin_btn(mock_message_delete)
+        mock_delete_admin.assert_called_with(987654321)
+        self.assertIn("успішно видалено", mock_send_msg.call_args[0][1])
+
 if __name__ == "__main__":
     unittest.main()

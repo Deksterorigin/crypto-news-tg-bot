@@ -484,12 +484,14 @@ def breaking_news_monitor_thread():
 
 # --- KEYBOARD BUILDERS ---
 
-def main_menu_keyboard() -> telebot.types.ReplyKeyboardMarkup:
+def main_menu_keyboard(user_id=None) -> telebot.types.ReplyKeyboardMarkup:
     """Builds the persistent bottom reply menu for admins."""
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row("📊 Статус", "⚙️ Налаштування")
     markup.row("📢 Канали", "🔗 RSS-Джерела")
     markup.row("📝 Тест-Пости", "⏳ Опублікувати зараз")
+    if user_id and user_id == get_owner_id():
+        markup.row("👥 Адміністратори")
     return markup
 
 def get_settings_menu() -> tuple[str, telebot.types.InlineKeyboardMarkup]:
@@ -548,7 +550,8 @@ def get_advanced_settings_menu() -> tuple[str, telebot.types.InlineKeyboardMarku
         telebot.types.InlineKeyboardButton("🚨 Breaking слова", callback_data="edit_breaking")
     )
     markup.add(
-        telebot.types.InlineKeyboardButton("🌐 Налаштувати Проксі", callback_data="edit_proxies")
+        telebot.types.InlineKeyboardButton("🌐 Налаштувати Проксі", callback_data="edit_proxies"),
+        telebot.types.InlineKeyboardButton("🔌 Перевірити Проксі", callback_data="check_proxies")
     )
     markup.add(
         telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="back_to_settings")
@@ -633,7 +636,7 @@ def process_set_news_count(message):
         if val <= 0 or val > 30:
             raise ValueError
         set_setting("news_count", str(val))
-        bot.send_message(message.chat.id, f"✅ Кількість новин успішно змінена на <b>{val}</b> на день!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+        bot.send_message(message.chat.id, f"✅ Кількість новин успішно змінена на <b>{val}</b> на день!", parse_mode="HTML", reply_markup=main_menu_keyboard(message.from_user.id))
     except ValueError:
         bot.send_message(message.chat.id, "❌ Помилка. Введіть позитивне число (від 1 до 30):")
         bot.register_next_step_handler(message, process_set_news_count)
@@ -646,7 +649,7 @@ def process_set_act_count(message):
         if val <= 0 or val > 20:
             raise ValueError
         set_setting("activity_count", str(val))
-        bot.send_message(message.chat.id, f"✅ Кількість активнотей успішно змінена на <b>{val}</b> на день!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+        bot.send_message(message.chat.id, f"✅ Кількість активнотей успішно змінена на <b>{val}</b> на день!", parse_mode="HTML", reply_markup=main_menu_keyboard(message.from_user.id))
     except ValueError:
         bot.send_message(message.chat.id, "❌ Помилка. Введіть позитивне число (від 1 до 20):")
         bot.register_next_step_handler(message, process_set_act_count)
@@ -660,7 +663,7 @@ def process_set_start_hour(message):
         if val < 0 or val >= end_h or val > 23:
             raise ValueError
         set_setting("start_hour", str(val))
-        bot.send_message(message.chat.id, f"✅ Початок активного вікна змінено на <b>{val}:00</b>!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+        bot.send_message(message.chat.id, f"✅ Початок активного вікна змінено на <b>{val}:00</b>!", parse_mode="HTML", reply_markup=main_menu_keyboard(message.from_user.id))
     except ValueError:
         bot.send_message(message.chat.id, f"❌ Помилка. Введіть годину від 0 до {int(get_setting('end_hour', '22'))-1}:")
         bot.register_next_step_handler(message, process_set_start_hour)
@@ -674,7 +677,7 @@ def process_set_end_hour(message):
         if val <= start_h or val > 24:
             raise ValueError
         set_setting("end_hour", str(val))
-        bot.send_message(message.chat.id, f"✅ Кінець активного вікна змінено на <b>{val}:00</b>!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+        bot.send_message(message.chat.id, f"✅ Кінець активного вікна змінено на <b>{val}:00</b>!", parse_mode="HTML", reply_markup=main_menu_keyboard(message.from_user.id))
     except ValueError:
         bot.send_message(message.chat.id, f"❌ Помилка. Введіть годину від {int(get_setting('start_hour', '10'))+1} до 24:")
         bot.register_next_step_handler(message, process_set_end_hour)
@@ -694,7 +697,7 @@ def process_add_channel(message):
         name = parts[1].strip()
         
         if add_channel(ch_id, name):
-            bot.send_message(message.chat.id, f"✅ Канал <b>{name}</b> успішно додано!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+            bot.send_message(message.chat.id, f"✅ Канал <b>{name}</b> успішно додано!", parse_mode="HTML", reply_markup=main_menu_keyboard(message.from_user.id))
         else:
             bot.send_message(message.chat.id, "❌ Не вдалося додати канал. Перевірте формат.")
     except Exception as e:
@@ -705,7 +708,7 @@ def process_delete_channel(message):
         return
     ch_id = message.text.strip()
     if delete_channel(ch_id):
-        bot.send_message(message.chat.id, f"✅ Канал з ID <code>{ch_id}</code> успішно видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard())
+        bot.send_message(message.chat.id, f"✅ Канал з ID <code>{ch_id}</code> успішно видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard(message.from_user.id))
     else:
         bot.send_message(message.chat.id, f"❌ Канал з ID <code>{ch_id}</code> не знайдено в базі.", parse_mode="HTML")
 
@@ -724,7 +727,7 @@ def process_add_feed(message):
         url = parts[1].strip()
         
         if add_rss_feed(name, url):
-            bot.send_message(message.chat.id, f"✅ Джерело <b>{name}</b> додано!", parse_mode="HTML", reply_markup=main_menu_keyboard())
+            bot.send_message(message.chat.id, f"✅ Джерело <b>{name}</b> додано!", parse_mode="HTML", reply_markup=main_menu_keyboard(message.from_user.id))
         else:
             bot.send_message(message.chat.id, "❌ Не вдалося додати джерело. Можливо, воно вже є.")
     except Exception as e:
@@ -735,7 +738,7 @@ def process_delete_feed(message):
         return
     url = message.text.strip()
     if delete_rss_feed(url):
-        bot.send_message(message.chat.id, f"✅ Джерело <code>{url}</code> видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard())
+        bot.send_message(message.chat.id, f"✅ Джерело <code>{url}</code> видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard(message.from_user.id))
     else:
         bot.send_message(message.chat.id, f"❌ Джерело з адресою <code>{url}</code> не знайдено.", parse_mode="HTML")
 
@@ -744,14 +747,14 @@ def process_edit_blacklist(message):
         return
     val = message.text.strip()
     set_setting("blacklist_words", val)
-    bot.send_message(message.chat.id, "✅ Чорний список слів успішно оновлено!", reply_markup=main_menu_keyboard())
+    bot.send_message(message.chat.id, "✅ Чорний список слів успішно оновлено!", reply_markup=main_menu_keyboard(message.from_user.id))
 
 def process_edit_breaking(message):
     if check_cancel_command(message):
         return
     val = message.text.strip()
     set_setting("breaking_keywords", val)
-    bot.send_message(message.chat.id, "✅ Ключові слова для Breaking News успішно оновлено!", reply_markup=main_menu_keyboard())
+    bot.send_message(message.chat.id, "✅ Ключові слова для Breaking News успішно оновлено!", reply_markup=main_menu_keyboard(message.from_user.id))
 
 def process_edit_proxies(message):
     if check_cancel_command(message):
@@ -760,7 +763,110 @@ def process_edit_proxies(message):
     if val.lower() in ["none", "empty", "очистити", "-", "видалити"]:
         val = ""
     set_setting("proxies", val)
-    bot.send_message(message.chat.id, "✅ Список проксі успешно оновлено!", reply_markup=main_menu_keyboard())
+    bot.send_message(message.chat.id, "✅ Список проксі успешно оновлено!", reply_markup=main_menu_keyboard(message.from_user.id))
+
+def format_proxy(proxy_str: str) -> str:
+    """Ensures the proxy string has a scheme, defaulting to http://."""
+    p = proxy_str.strip()
+    if not (p.startswith("http://") or p.startswith("https://") or p.startswith("socks5://") or p.startswith("socks4://")):
+        return "http://" + p
+    return p
+
+def check_proxies_job(chat_id, message_id, proxies_list):
+    """Worker job running in a background thread to check configured proxies."""
+    results = []
+    total = len(proxies_list)
+    
+    for idx, proxy in enumerate(proxies_list, 1):
+        try:
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"⏳ <b>Перевірка проксі у процесі...</b>\n\nПеревірено: <b>{idx - 1} / {total}</b>\nПоточний проксі: <code>{proxy}</code>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+            
+        formatted_proxy = format_proxy(proxy)
+        try:
+            start_time = time.time()
+            response = requests.get(
+                "https://api.coingecko.com/api/v3/ping",
+                proxies={"http": formatted_proxy, "https": formatted_proxy},
+                timeout=5
+            )
+            latency = int((time.time() - start_time) * 1000)
+            if response.status_code == 200:
+                results.append((proxy, True, f"✅ Працює ({latency}ms)"))
+            else:
+                results.append((proxy, False, f"⚠️ Помилка (код: {response.status_code})"))
+        except Exception as e:
+            results.append((proxy, False, f"❌ Не працює ({type(e).__name__})"))
+            
+    working_count = sum(1 for r in results if r[1])
+    lines = []
+    for proxy, is_ok, status in results:
+        lines.append(f"• <code>{proxy}</code>: {status}")
+        
+    result_text = (
+        f"🌐 <b>Результати перевірки проксі:</b>\n\n"
+        + "\n".join(lines) + "\n\n"
+        f"📊 Усього: <b>{total}</b> | Працює: <b>{working_count}</b>\n\n"
+        f"<i>Бот автоматично ротує проксі зі списку. Якщо всі проксі не працюють, використовується пряме підключення.</i>"
+    )
+    
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton("🔄 Повторити перевірку", callback_data="check_proxies"),
+        telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="advanced_settings")
+    )
+    
+    try:
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=result_text,
+            parse_mode="HTML",
+            reply_markup=markup
+        )
+    except Exception:
+        try:
+            bot.send_message(chat_id, result_text, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            pass
+
+def process_add_admin_btn(message):
+    if check_cancel_command(message):
+        return
+    try:
+        parts = message.text.strip().split()
+        if len(parts) < 1:
+            raise ValueError
+        user_id = int(parts[0])
+        username = parts[1] if len(parts) > 1 else ""
+        if username.startswith("@"):
+            username = username[1:]
+        if add_admin(user_id, username):
+            bot.send_message(message.chat.id, f"✅ Адміністратора з ID <code>{user_id}</code> (@{username or 'немає'}) успішно додано!", parse_mode="HTML", reply_markup=main_menu_keyboard(message.from_user.id))
+        else:
+            bot.send_message(message.chat.id, "❌ Не вдалося додати адміністратора.")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Помилка. Будь ласка, введіть числовий ID та Username (опціонально) через пробіл:")
+        bot.register_next_step_handler(message, process_add_admin_btn)
+
+def process_delete_admin_btn(message):
+    if check_cancel_command(message):
+        return
+    try:
+        user_id = int(message.text.strip())
+        if delete_admin(user_id):
+            bot.send_message(message.chat.id, f"✅ Адміністратора з ID <code>{user_id}</code> успішно видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard(message.from_user.id))
+        else:
+            bot.send_message(message.chat.id, f"❌ Адміністратора з ID <code>{user_id}</code> не знайдено в базі.", parse_mode="HTML")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Помилка. Будь ласка, введіть числовий ID адміністратора:")
+        bot.register_next_step_handler(message, process_delete_admin_btn)
 
 def handle_list_admins(message):
     admins = get_admins()
@@ -771,7 +877,16 @@ def handle_list_admins(message):
     else:
         for idx, adm in enumerate(admins, 1):
             text += f"{idx}. ID: <code>{adm['user_id']}</code> | @{adm['username'] or 'немає'} (доданий: {adm['added_at']})\n"
-    bot.send_message(message.chat.id, text, parse_mode="HTML")
+            
+    markup = telebot.types.InlineKeyboardMarkup()
+    if message.from_user.id == owner_id:
+        markup.add(
+            telebot.types.InlineKeyboardButton("➕ Додати адміна", callback_data="add_admin_btn"),
+            telebot.types.InlineKeyboardButton("❌ Видалити адміна", callback_data="delete_admin_btn")
+        )
+        bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, text, parse_mode="HTML")
 
 def handle_add_admin(message):
     try:
@@ -796,7 +911,7 @@ def handle_delete_admin(message):
             return
         user_id = int(parts[1])
         if delete_admin(user_id):
-            bot.reply_to(message, f"✅ Адміністратора з ID <code>{user_id}</code> видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard())
+            bot.reply_to(message, f"✅ Адміністратора з ID <code>{user_id}</code> видалено.", parse_mode="HTML", reply_markup=main_menu_keyboard(message.from_user.id))
         else:
             bot.reply_to(message, f"❌ Адміністратора з ID <code>{user_id}</code> не знайдено.", parse_mode="HTML")
     except Exception as e:
@@ -928,6 +1043,33 @@ def handle_inline_callbacks(call):
         msg = bot.send_message(chat_id, "🌐 Введіть список проксі через кому або новий рядок у форматі <code>http://user:pass@ip:port</code> (або напишіть 'видалити' для очищення):", parse_mode="HTML")
         bot.register_next_step_handler(msg, process_edit_proxies)
         bot.answer_callback_query(call.id)
+    elif action == "check_proxies":
+        proxies_str = get_setting("proxies", "").strip()
+        if not proxies_str:
+            bot.answer_callback_query(call.id, "🔌 Список проксі порожній. Бот використовує пряме підключення.", show_alert=True)
+        else:
+            proxies_list = [p.strip() for p in proxies_str.replace("\n", ",").split(",") if p.strip()]
+            bot.answer_callback_query(call.id, "⏳ Початок перевірки проксі...")
+            threading.Thread(
+                target=check_proxies_job,
+                args=(chat_id, call.message.message_id, proxies_list)
+            ).start()
+    elif action == "add_admin_btn":
+        owner_id = get_owner_id()
+        if user_id != owner_id:
+            bot.answer_callback_query(call.id, "🔒 Тільки власник може додавати адміністраторів!", show_alert=True)
+        else:
+            bot.answer_callback_query(call.id)
+            msg = bot.send_message(chat_id, "👥 Введіть ID та Username нового адміністратора через пробіл (наприклад: <code>123456789 username</code>):", parse_mode="HTML")
+            bot.register_next_step_handler(msg, process_add_admin_btn)
+    elif action == "delete_admin_btn":
+        owner_id = get_owner_id()
+        if user_id != owner_id:
+            bot.answer_callback_query(call.id, "🔒 Тільки власник може видаляти адміністраторів!", show_alert=True)
+        else:
+            bot.answer_callback_query(call.id)
+            msg = bot.send_message(chat_id, "❌ Введіть точний ID адміністратора, якого потрібно видалити:")
+            bot.register_next_step_handler(msg, process_delete_admin_btn)
         
     # Test Actions (Dry Run)
     elif action == "t_news":
@@ -972,7 +1114,7 @@ def handle_start(message):
             message.chat.id, 
             f"👑 <b>Вітаємо!</b>\nВи автоматично зареєстровані як <b>Власник</b> цього бота (Ваш ID: <code>{user_id}</code>).", 
             parse_mode="HTML",
-            reply_markup=main_menu_keyboard()
+            reply_markup=main_menu_keyboard(user_id)
         )
         
     if not is_admin(user_id):
@@ -998,7 +1140,7 @@ def handle_start(message):
         "/delete_admin [ID] — Видалити адміністратора\n"
         "/regenerate — Примусово перегенерувати розклад на сьогодні за поточними налаштуваннями"
     )
-    bot.send_message(message.chat.id, help_text, parse_mode="HTML", reply_markup=main_menu_keyboard())
+    bot.send_message(message.chat.id, help_text, parse_mode="HTML", reply_markup=main_menu_keyboard(user_id))
 
 @bot.message_handler(commands=["analytics"])
 @admin_only
@@ -1012,7 +1154,7 @@ def handle_regenerate(message):
     bot.reply_to(message, "🔄 Розклад на сьогодні успішно перегенеровано на основі актуальних налаштувань!")
 
 # Map Text Buttons
-@bot.message_handler(func=lambda message: message.text in ["📊 Статус", "⚙️ Налаштування", "📢 Канали", "🔗 RSS-Джерела", "📝 Тест-Пости", "⏳ Опублікувати зараз"])
+@bot.message_handler(func=lambda message: message.text in ["📊 Статус", "⚙️ Налаштування", "📢 Канали", "🔗 RSS-Джерела", "📝 Тест-Пости", "⏳ Опублікувати зараз", "👥 Адміністратори"])
 @admin_only
 def handle_menu_buttons(message):
     btn_text = message.text
@@ -1031,6 +1173,9 @@ def handle_menu_buttons(message):
     elif btn_text == "🔗 RSS-Джерела":
         text, markup = get_feeds_menu()
         bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+        
+    elif btn_text == "👥 Адміністратори":
+        handle_list_admins(message)
         
     elif btn_text == "📝 Тест-Пости":
         bot.send_message(

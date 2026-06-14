@@ -120,7 +120,7 @@ def keep_alive_thread():
     logging.info(f"Self-pinging keep-alive loop started for: {url}")
     while True:
         try:
-            time.sleep(600)  # Ping every 10 minutes
+            time.sleep(300)  # Ping every 5 minutes
             response = requests.get(url)
             logging.info(f"Self-ping sent to {url}, response status: {response.status_code}")
         except Exception as e:

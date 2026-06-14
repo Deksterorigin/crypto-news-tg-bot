@@ -7,7 +7,7 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
         
     print("=== Testing Telegram Channel Connection ===")
-    print(f"Bot Token: {BOT_TOKEN[:10]}...{BOT_TOKEN[-5:] if len(BOT_TOKEN) > 15 else ''}")
+    print(f"Bot Token: {'Loaded (length: ' + str(len(BOT_TOKEN)) + ')' if BOT_TOKEN else 'Not loaded'}")
     print(f"Channel ID: {CHANNEL_ID}")
     
     bot = telebot.TeleBot(BOT_TOKEN)

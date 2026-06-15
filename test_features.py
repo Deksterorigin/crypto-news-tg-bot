@@ -13,6 +13,13 @@ import bot
 class TestNewFeatures(unittest.TestCase):
     
     def setUp(self):
+        # Clear or reset owner_id in DB to avoid MagicMock contamination
+        from db import get_connection
+        with get_connection() as conn:
+            conn.execute("DELETE FROM settings WHERE key = 'owner_id'")
+            conn.commit()
+        set_setting("owner_id", "12345")
+        
         # Set up default test setting values
         set_setting("blacklist_words", "presale, scam, pre-sale")
         set_setting("breaking_keywords", "massive, hack, sec, approved")
@@ -394,6 +401,58 @@ class TestNewFeatures(unittest.TestCase):
         # Admin notification called
         self.assertTrue(mock_notify.called)
         mock_notify.assert_called_with("news")
+
+    @patch('bot.is_admin', return_value=True)
+    @patch('bot.handle_analytics')
+    @patch('bot.handle_regenerate')
+    @patch('bot.handle_backup_db')
+    @patch('bot.handle_start')
+    def test_new_reply_keyboard_buttons(self, mock_start, mock_backup, mock_regenerate, mock_analytics, mock_is_admin):
+        from bot import handle_menu_buttons
+        
+        # Test 📈 Аналітика
+        mock_msg = MagicMock()
+        mock_msg.text = "📈 Аналітика"
+        mock_msg.from_user.id = 12345
+        handle_menu_buttons(mock_msg)
+        mock_analytics.assert_called_once_with(mock_msg)
+        
+        # Test 🔄 Оновити розклад
+        mock_msg.text = "🔄 Оновити розклад"
+        mock_msg.from_user.id = 12345
+        handle_menu_buttons(mock_msg)
+        mock_regenerate.assert_called_once_with(mock_msg)
+        
+        # Test 💾 Резервна копія БД
+        mock_msg.text = "💾 Резервна копія БД"
+        mock_msg.from_user.id = 12345
+        handle_menu_buttons(mock_msg)
+        mock_backup.assert_called_once_with(mock_msg)
+        
+        # Test ℹ️ Довідка
+        mock_msg.text = "ℹ️ Довідка"
+        mock_msg.from_user.id = 12345
+        handle_menu_buttons(mock_msg)
+        mock_start.assert_called_once_with(mock_msg)
+
+    @patch('bot.bot.clear_step_handler_by_chat_id')
+    @patch('bot.bot.process_new_messages')
+    def test_check_cancel_command_with_menu_button(self, mock_process, mock_clear):
+        from bot import check_cancel_command
+        
+        mock_msg = MagicMock()
+        mock_msg.text = "📊 Статус"
+        mock_msg.chat.id = 12345
+        
+        res = check_cancel_command(mock_msg)
+        self.assertTrue(res)
+        mock_clear.assert_called_once_with(chat_id=12345)
+        mock_process.assert_called_once_with([mock_msg])
+        
+        # Test regular text does not cancel
+        mock_msg.text = "Just some text"
+        res_regular = check_cancel_command(mock_msg)
+        self.assertFalse(res_regular)
 
 if __name__ == "__main__":
     unittest.main()

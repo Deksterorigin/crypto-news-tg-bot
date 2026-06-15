@@ -598,11 +598,15 @@ def breaking_news_monitor_thread():
 def main_menu_keyboard(user_id=None) -> telebot.types.ReplyKeyboardMarkup:
     """Builds the persistent bottom reply menu for admins."""
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("📊 Статус", "⚙️ Налаштування")
+    markup.row("📊 Статус", "📈 Аналітика")
+    markup.row("⚙️ Налаштування", "🔄 Оновити розклад")
     markup.row("📢 Канали", "🔗 RSS-Джерела")
     markup.row("📝 Тест-Пости", "⏳ Опублікувати зараз")
     if user_id and user_id == get_owner_id():
-        markup.row("👥 Адміністратори")
+        markup.row("👥 Адміністратори", "💾 Резервна копія БД")
+        markup.row("ℹ️ Довідка")
+    else:
+        markup.row("ℹ️ Довідка")
     return markup
 
 def get_settings_menu() -> tuple[str, telebot.types.InlineKeyboardMarkup]:
@@ -732,8 +736,13 @@ def get_publish_menu() -> telebot.types.InlineKeyboardMarkup:
 # --- TELEGRAM BOT DYNAMIC DIALOG FLOWS (register_next_step_handler) ---
 
 def check_cancel_command(message) -> bool:
-    """If message is a command, clears step handler, re-processes the command, and returns True."""
-    if message.text and message.text.startswith("/"):
+    """If message is a command or menu button, clears step handler, re-processes it, and returns True."""
+    menu_buttons = [
+        "📊 Статус", "📈 Аналітика", "⚙️ Налаштування", "🔄 Оновити розклад", 
+        "📢 Канали", "🔗 RSS-Джерела", "📝 Тест-Пости", "⏳ Опублікувати зараз", 
+        "👥 Адміністратори", "💾 Резервна копія БД", "ℹ️ Довідка"
+    ]
+    if message.text and (message.text.startswith("/") or message.text in menu_buttons):
         bot.clear_step_handler_by_chat_id(chat_id=message.chat.id)
         bot.process_new_messages([message])
         return True
@@ -1241,15 +1250,22 @@ def handle_start(message):
 
     # Admin Help
     help_text = (
-        "👋 <b>Панель Адміністратора (v3.4):</b>\n\n"
-        "Використовуйте кнопки меню нижче для управління каналами, RSS-стрічками, розкладом та публікаціями.\n\n"
-        "📊 <b>Аналітика:</b>\n"
-        "/analytics — Аналітика каналів (підписники, приріст, публікації)\n\n"
-        "👑 <b>Команди Власника:</b>\n"
-        "/list_admins — Список адміністраторів\n"
-        "/add_admin [ID] [Нікнейм] — Додати адміністратора\n"
-        "/delete_admin [ID] — Видалити адміністратора\n"
-        "/regenerate — Примусово перегенерувати розклад на сьогодні за поточними налаштуваннями"
+        "👋 <b>Панель Адміністратора (v3.5):</b>\n\n"
+        "Усіма функціями бота можна керувати за допомогою зручних кнопок меню нижче. "
+        "Вам більше не потрібно вводити текстові команди вручну!\n\n"
+        "📊 <b>Доступні розділи меню:</b>\n"
+        "• <b>📊 Статус</b> — Перегляд розкладу публікацій на сьогодні та статусу виконання\n"
+        "• <b>📈 Аналітика</b> — Статистика підписників та загальна кількість опублікованих постів у каналах\n"
+        "• <b>⚙️ Налаштування</b> — Кількість постів на день та години активного вікна бота\n"
+        "• <b>🔄 Оновити розклад</b> — Примусово перегенерувати розклад постів на сьогодні\n"
+        "• <b>📢 Канали</b> — Додавання та видалення каналів для публікації\n"
+        "• <b>🔗 RSS-Джерела</b> — Керування RSS-стрічками новин для збору інформації\n"
+        "• <b>📝 Тест-Пости</b> — Генерація тестового поста у цей чат (без публікації у канали)\n"
+        "• <b>⏳ Опублікувати зараз</b> — Примусова генерація та негайна публікація обраного типу поста у канали\n\n"
+        "👑 <b>Панель Власника (показується тільки вам):</b>\n"
+        "• <b>👥 Адміністратори</b> — Перегляд списку адміністраторів та надання/відкликання доступу\n"
+        "• <b>💾 Резервна копія БД</b> — Скачати файл бази даних (data.db)\n"
+        "• <b>ℹ️ Довідка</b> — Показати це повідомлення з описом кнопок"
     )
     bot.send_message(message.chat.id, help_text, parse_mode="HTML", reply_markup=main_menu_keyboard(user_id))
 
@@ -1265,7 +1281,11 @@ def handle_regenerate(message):
     bot.reply_to(message, "🔄 Розклад на сьогодні успішно перегенеровано на основі актуальних налаштувань!")
 
 # Map Text Buttons
-@bot.message_handler(func=lambda message: message.text in ["📊 Статус", "⚙️ Налаштування", "📢 Канали", "🔗 RSS-Джерела", "📝 Тест-Пости", "⏳ Опублікувати зараз", "👥 Адміністратори"])
+@bot.message_handler(func=lambda message: message.text in [
+    "📊 Статус", "📈 Аналітика", "⚙️ Налаштування", "🔄 Оновити розклад", 
+    "📢 Канали", "🔗 RSS-Джерела", "📝 Тест-Пости", "⏳ Опублікувати зараз", 
+    "👥 Адміністратори", "💾 Резервна копія БД", "ℹ️ Довідка"
+])
 @admin_only
 def handle_menu_buttons(message):
     btn_text = message.text
@@ -1273,9 +1293,15 @@ def handle_menu_buttons(message):
     if btn_text == "📊 Статус":
         handle_status(message)
         
+    elif btn_text == "📈 Аналітика":
+        handle_analytics(message)
+        
     elif btn_text == "⚙️ Налаштування":
         text, markup = get_settings_menu()
         bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
+        
+    elif btn_text == "🔄 Оновити розклад":
+        handle_regenerate(message)
         
     elif btn_text == "📢 Канали":
         text, markup = get_channels_menu()
@@ -1287,6 +1313,12 @@ def handle_menu_buttons(message):
         
     elif btn_text == "👥 Адміністратори":
         handle_list_admins(message)
+        
+    elif btn_text == "💾 Резервна копія БД":
+        handle_backup_db(message)
+        
+    elif btn_text == "ℹ️ Довідка":
+        handle_start(message)
         
     elif btn_text == "📝 Тест-Пости":
         bot.send_message(

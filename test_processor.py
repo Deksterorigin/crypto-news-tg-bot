@@ -22,7 +22,8 @@ def main():
     for idx, item in enumerate(batch, 1):
         print(f"  {idx}. [{item['source']}] {item['title']}")
         
-    selected_link, post_text, poll = generate_single_post_by_type(batch, "news")
+    import asyncio
+    selected_link, post_text, poll = asyncio.run(generate_single_post_by_type(batch, "news"))
     
     print("\n" + "=" * 20 + " GENERATED POST PREVIEW " + "=" * 20)
     if post_text:

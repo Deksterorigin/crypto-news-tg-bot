@@ -1,15 +1,84 @@
-import google.generativeai as genai
 import logging
 import json
 import difflib
-from typing import List, Dict, Any, Tuple
+import asyncio
+from typing import List, Dict, Any, Tuple, Optional, TypedDict
+
+class Poll(TypedDict):
+    question: str
+    options: List[str]
+
+class NewsResponse(TypedDict):
+    selected_link: Optional[str]
+    post_text: str
+    poll: Optional[Poll]
+
+class UrgencyResponse(TypedDict):
+    is_really_urgent: bool
+
+NEWS_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "selected_link": {
+            "type": "string",
+            "nullable": True
+        },
+        "post_text": {
+            "type": "string"
+        },
+        "poll": {
+            "type": "object",
+            "nullable": True,
+            "properties": {
+                "question": {
+                    "type": "string"
+                },
+                "options": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            },
+            "required": ["question", "options"]
+        }
+    },
+    "required": ["selected_link", "post_text", "poll"]
+}
+
+URGENCY_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_really_urgent": {
+            "type": "boolean"
+        }
+    },
+    "required": ["is_really_urgent"]
+}
+
+
+def robust_json_loads(text: str) -> dict:
+    text_clean = text.strip()
+    if text_clean.startswith("```"):
+        first_nl = text_clean.find("\n")
+        if first_nl != -1:
+            text_clean = text_clean[first_nl:].strip()
+        if text_clean.endswith("```"):
+            text_clean = text_clean[:-3].strip()
+            
+    try:
+        return json.loads(text_clean)
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to parse JSON. Error: {e}. Raw response text was:\n{text}")
+        raise e
 from config import GEMINI_API_KEY, POST_LANGUAGE
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Configure Gemini API
-genai.configure(api_key=GEMINI_API_KEY)
+# Configure Gemini Orchestrator
+from gemini_orchestrator import GeminiOrchestrator, AllModelsExhaustedError
+orchestrator = GeminiOrchestrator(api_key=GEMINI_API_KEY)
 
 # Define language mapping for prompt
 LANG_NAME = {
@@ -198,7 +267,7 @@ def jaccard_similarity(title1: str, title2: str) -> float:
     union = tokens1.union(tokens2)
     return len(intersection) / len(union)
 
-def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str, skip_dedup: bool = False) -> Tuple[str, str, Any]:
+async def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str, skip_dedup: bool = False) -> Tuple[str, str, Any]:
     """
     Sends a list of items to Gemini. Gemini selects the top item of the requested type (news/activity),
     translates/summarizes it, adds hashtags, and returns (selected_link, post_text).
@@ -207,12 +276,11 @@ def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str, sk
         logging.info("No items to process.")
         return None, "", None
 
-    # Fetch recent posted titles to prevent duplicates
     recent_titles = []
     if not skip_dedup:
         try:
             from db import get_recent_posted_titles
-            recent_titles = get_recent_posted_titles(days=7)
+            recent_titles = await asyncio.to_thread(get_recent_posted_titles, 7)
         except Exception as e:
             logging.error(f"Error fetching recent posted titles for deduplication: {e}")
 
@@ -268,21 +336,17 @@ def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str, sk
     )
     
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
-            system_instruction=get_system_instruction(post_type)
-        )
-        
-        response = model.generate_content(
+        result_text = await orchestrator.generate_content(
             prompt,
             generation_config={
                 "temperature": 0.2,
-                "response_mime_type": "application/json"
-            }
+                "response_mime_type": "application/json",
+                "response_schema": NEWS_RESPONSE_SCHEMA
+            },
+            system_instruction=get_system_instruction(post_type)
         )
         
-        result_text = response.text.strip()
-        data = json.loads(result_text)
+        data = robust_json_loads(result_text)
         
         selected_link = data.get("selected_link")
         post_text = data.get("post_text", "").strip()
@@ -292,9 +356,9 @@ def generate_single_post_by_type(items: List[Dict[str, Any]], post_type: str, sk
         
     except Exception as e:
         logging.error(f"Error calling Gemini API for type {post_type}: {e}")
-        return None, "", None
+        raise e
 
-def generate_market_analysis(prices: dict, headlines: List[str]) -> str:
+async def generate_market_analysis(prices: dict, headlines: List[str]) -> str:
     """
     Generates a daily market analysis review using CoinGecko prices and recent headlines.
     """
@@ -308,23 +372,18 @@ def generate_market_analysis(prices: dict, headlines: List[str]) -> str:
     )
     
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
+        analysis_text = await orchestrator.generate_content(
+            prompt,
+            generation_config={"temperature": 0.4},
             system_instruction=get_analysis_system_instruction()
         )
-        
-        response = model.generate_content(
-            prompt,
-            generation_config={"temperature": 0.4}
-        )
-        
-        return response.text.strip()
+        return analysis_text
         
     except Exception as e:
         logging.error(f"Error generating market analysis: {e}")
-        return ""
+        raise e
 
-def is_news_highly_urgent(title: str, summary: str) -> bool:
+async def is_news_highly_urgent(title: str, summary: str) -> bool:
     """Uses Gemini to check if a news item is truly urgent breaking news (market-moving, major exploit, etc.)."""
     prompt = (
         f"Analyze the following cryptocurrency news item:\n"
@@ -340,17 +399,15 @@ def is_news_highly_urgent(title: str, summary: str) -> bool:
         f"}}\n"
     )
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash"
-        )
-        response = model.generate_content(
+        result_text = await orchestrator.generate_content(
             prompt,
             generation_config={
                 "temperature": 0.0,
-                "response_mime_type": "application/json"
+                "response_mime_type": "application/json",
+                "response_schema": URGENCY_RESPONSE_SCHEMA
             }
         )
-        data = json.loads(response.text.strip())
+        data = robust_json_loads(result_text)
         return data.get("is_really_urgent", False)
     except Exception as e:
         logging.error(f"Error validating breaking news urgency: {e}")

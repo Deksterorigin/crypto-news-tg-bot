@@ -300,7 +300,7 @@ class TestNewFeatures(unittest.TestCase):
         self.assertNotEqual(ids1, ids3)
 
     @patch('bot.time.sleep', side_effect=KeyboardInterrupt)
-    @patch('bot.run_publish_cycle_by_type', return_value=True)
+    @patch('bot.run_publish_cycle_by_type', return_value=(True, None))
     def test_scheduler_catchup_spacing(self, mock_publish, mock_sleep):
         from db import get_connection
         from datetime import datetime, timedelta
@@ -360,7 +360,7 @@ class TestNewFeatures(unittest.TestCase):
         self.assertTrue(rows[2]["post_time"].startswith(expected_time3))
 
     @patch('bot.time.sleep', side_effect=KeyboardInterrupt)
-    @patch('bot.run_publish_cycle_by_type', return_value=False)
+    @patch('bot.run_publish_cycle_by_type', return_value=(False, "Mocked Failure"))
     @patch('bot.notify_admins_of_failure')
     def test_scheduler_failure_rescheduling(self, mock_notify, mock_publish, mock_sleep):
         from db import get_connection
@@ -400,7 +400,7 @@ class TestNewFeatures(unittest.TestCase):
         
         # Admin notification called
         self.assertTrue(mock_notify.called)
-        mock_notify.assert_called_with("news")
+        mock_notify.assert_called_with("news", "Mocked Failure")
 
     @patch('bot.is_admin', return_value=True)
     @patch('bot.handle_analytics')

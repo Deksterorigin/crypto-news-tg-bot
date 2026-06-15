@@ -145,54 +145,113 @@ def fetch_coingecko_prices() -> dict:
 
 # --- SCHEDULER & PUBLISHING LOGIC ---
 
-def generate_daily_schedule():
+def generate_daily_schedule(force=False):
     """
-    Generates schedules dynamically based on settings in SQLite database.
-    Window boundaries and counts are fully customized.
+    Generates schedules dynamically based on settings in SQLite database and saves them to DB.
+    Also syncs with the in-memory global lists for legacy/status commands compatibility.
     """
     global scheduled_news, scheduled_activities, scheduled_analysis, scheduled_date
+    now = get_berlin_now()
+    today = now.date()
+    
     with schedule_lock:
-        now = get_berlin_now()
-        today = now.date()
-        
-        # Load dynamic configurations (with default Fallbacks)
-        news_count = int(get_setting("news_count", "6"))
-        activity_count = int(get_setting("activity_count", "4"))
-        start_hour = int(get_setting("start_hour", "10"))
-        end_hour = int(get_setting("end_hour", "22"))
-        
-        # Calculate window boundary minutes
-        window_minutes = (end_hour - start_hour) * 60
-        start_offset = start_hour * 60
-        
-        # 1. News Queue
-        news_times = []
-        news_segment = float(window_minutes) / news_count
-        for i in range(news_count):
-            offset = random.randint(int(i * news_segment), int((i + 1) * news_segment) - 1)
-            news_times.append(datetime.combine(today, datetime.min.time()) + timedelta(minutes=start_offset + offset))
-        news_times.sort()
-        scheduled_news = news_times
-        
-        # 2. Activity Queue
-        activity_times = []
-        activity_segment = float(window_minutes) / activity_count
-        for i in range(activity_count):
-            offset = random.randint(int(i * activity_segment), int((i + 1) * activity_segment) - 1)
-            activity_times.append(datetime.combine(today, datetime.min.time()) + timedelta(minutes=start_offset + offset))
-        activity_times.sort()
-        scheduled_activities = activity_times
-        
-        # 3. Market Analysis: 1 post (randomly in the first 2 hours of the starting hour)
-        analysis_offset = random.randint(start_offset + 60, start_offset + 180)
-        scheduled_analysis = [datetime.combine(today, datetime.min.time()) + timedelta(minutes=analysis_offset)]
-        
-        scheduled_date = today
-        
-        logging.info(f"Daily schedules generated dynamically for {today}:")
-        logging.info(f"  News Queue ({news_count}): {[t.strftime('%H:%M') for t in scheduled_news]}")
-        logging.info(f"  Activity Queue ({activity_count}): {[t.strftime('%H:%M') for t in scheduled_activities]}")
-        logging.info(f"  Analysis Column (1): {[t.strftime('%H:%M') for t in scheduled_analysis]}")
+        try:
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM daily_schedule WHERE date(post_time) = ?", (today.isoformat(),))
+                count = cursor.fetchone()[0]
+        except Exception as e:
+            logging.error(f"Error checking schedule in DB: {e}")
+            count = 0
+            
+        if count == 0 or force:
+            try:
+                if force:
+                    with get_connection() as conn:
+                        conn.execute("DELETE FROM daily_schedule WHERE date(post_time) = ?", (today.isoformat(),))
+                        conn.commit()
+                        logging.info(f"Forced regeneration: deleted today's schedule for {today}")
+                
+                # Load dynamic configurations (with default Fallbacks)
+                news_count = int(get_setting("news_count", "6"))
+                activity_count = int(get_setting("activity_count", "4"))
+                start_hour = int(get_setting("start_hour", "10"))
+                end_hour = int(get_setting("end_hour", "22"))
+                
+                # Calculate window boundary minutes
+                window_minutes = (end_hour - start_hour) * 60
+                start_offset = start_hour * 60
+                
+                # 1. News Queue
+                news_times = []
+                news_segment = float(window_minutes) / news_count
+                for i in range(news_count):
+                    offset = random.randint(int(i * news_segment), int((i + 1) * news_segment) - 1)
+                    dt = datetime.combine(today, datetime.min.time()) + timedelta(minutes=start_offset + offset)
+                    news_times.append(dt)
+                
+                # 2. Activity Queue
+                activity_times = []
+                activity_segment = float(window_minutes) / activity_count
+                for i in range(activity_count):
+                    offset = random.randint(int(i * activity_segment), int((i + 1) * activity_segment) - 1)
+                    dt = datetime.combine(today, datetime.min.time()) + timedelta(minutes=start_offset + offset)
+                    activity_times.append(dt)
+                
+                # 3. Market Analysis: 1 post
+                analysis_offset = random.randint(start_offset + 60, start_offset + 180)
+                analysis_dt = datetime.combine(today, datetime.min.time()) + timedelta(minutes=analysis_offset)
+                
+                # Save to database
+                with get_connection() as conn:
+                    for dt in news_times:
+                        is_exec = 1 if dt < now else 0
+                        conn.execute(
+                            "INSERT INTO daily_schedule (post_time, post_type, is_executed) VALUES (?, 'news', ?)",
+                            (dt.strftime('%Y-%m-%d %H:%M:%S'), is_exec)
+                        )
+                    for dt in activity_times:
+                        is_exec = 1 if dt < now else 0
+                        conn.execute(
+                            "INSERT INTO daily_schedule (post_time, post_type, is_executed) VALUES (?, 'activity', ?)",
+                            (dt.strftime('%Y-%m-%d %H:%M:%S'), is_exec)
+                        )
+                    is_exec = 1 if analysis_dt < now else 0
+                    conn.execute(
+                        "INSERT INTO daily_schedule (post_time, post_type, is_executed) VALUES (?, 'analysis', ?)",
+                        (analysis_dt.strftime('%Y-%m-%d %H:%M:%S'), is_exec)
+                    )
+                    conn.commit()
+                logging.info(f"Daily schedules generated dynamically and saved to DB for {today}.")
+            except Exception as e:
+                logging.error(f"Error generating daily schedule: {e}")
+            
+        # Sync globals for legacy/status commands compatibility
+        try:
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT post_time, post_type FROM daily_schedule WHERE date(post_time) = ? ORDER BY post_time ASC",
+                    (today.isoformat(),)
+                )
+                rows = cursor.fetchall()
+                
+            scheduled_news = []
+            scheduled_activities = []
+            scheduled_analysis = []
+            
+            for row in rows:
+                dt = datetime.strptime(row["post_time"], '%Y-%m-%d %H:%M:%S')
+                ptype = row["post_type"]
+                if ptype == "news":
+                    scheduled_news.append(dt)
+                elif ptype == "activity":
+                    scheduled_activities.append(dt)
+                elif ptype == "analysis":
+                    scheduled_analysis.append(dt)
+            scheduled_date = today
+        except Exception as e:
+            logging.error(f"Error syncing schedule globals: {e}")
 
 def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
     """Executes a news or activity publishing cycle, posting to all registered channels."""
@@ -244,10 +303,7 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
                         logging.error(f"Failed to send poll to {target}: {pole}")
                 
             if not test_chat_id:
-                # Mark all items as processed (not posted)
-                for item in items:
-                    mark_as_published(item["link"], item["title"], item["source"], was_posted=0)
-                # Mark the chosen item as actually posted
+                # Mark ONLY the chosen item as actually posted
                 selected_item = next((i for i in items if i["link"] == selected_link), None)
                 if selected_item:
                     mark_as_published(selected_item["link"], selected_item["title"], selected_item["source"], was_posted=1)
@@ -256,11 +312,6 @@ def run_publish_cycle_by_type(post_type: str, test_chat_id=None) -> bool:
             logging.info(f"No suitable post of type {post_type} selected.")
             if test_chat_id:
                 bot.send_message(test_chat_id, f"⚠️ Gemini не знайшов підходящих матеріалів для типу '{post_type}'.")
-            
-            if not test_chat_id:
-                # Mark all items as processed (none of them were posted)
-                for item in items:
-                    mark_as_published(item["link"], item["title"], item["source"], was_posted=0)
             return False
             
     except Exception as e:
@@ -319,77 +370,137 @@ def run_market_analysis_cycle(test_chat_id=None) -> bool:
             bot.send_message(test_chat_id, f"❌ Помилка аналітики: {e}")
         return False
 
+def get_pending_scheduled_posts(max_time: datetime) -> list:
+    """Gets all unscheduled posts whose scheduled time has passed."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, post_time, post_type, is_executed FROM daily_schedule "
+                "WHERE is_executed = 0 AND post_time <= ? ORDER BY post_time ASC",
+                (max_time.strftime('%Y-%m-%d %H:%M:%S'),)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        logging.error(f"Error fetching pending scheduled posts: {e}")
+        return []
+
+def mark_scheduled_post_executed(post_id: int):
+    """Marks a scheduled post as successfully executed in SQLite."""
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE daily_schedule SET is_executed = 1 WHERE id = ?",
+                (post_id,)
+            )
+            conn.commit()
+    except Exception as e:
+        logging.error(f"Error marking scheduled post as executed: {e}")
+
+def reschedule_scheduled_post(post_id: int, new_time: datetime):
+    """Updates the schedule time of a post in SQLite."""
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE daily_schedule SET post_time = ? WHERE id = ?",
+                (new_time.strftime('%Y-%m-%d %H:%M:%S'), post_id)
+            )
+            conn.commit()
+    except Exception as e:
+        logging.error(f"Error rescheduling post: {e}")
+
+def notify_admins_of_failure(post_type: str, reason: str = "не знайдено нового контенту або помилка ШІ"):
+    """Sends a failure notification to the owner and all administrators."""
+    owner_id = get_owner_id()
+    admins = get_admins()
+    
+    ptype_ua = {
+        "news": "Новини",
+        "activity": "Активності",
+        "analysis": "Аналітика ринку"
+    }.get(post_type, post_type)
+    
+    text = (
+        f"⚠️ <b>Попередження автопостингу</b>\n\n"
+        f"Бот не зміг опублікувати запланований пост типу: <b>{ptype_ua}</b>.\n"
+        f"Причина: {reason}.\n"
+        f"🕒 Пост перенесено на 30 хвилин пізніше."
+    )
+    
+    targets = []
+    if owner_id:
+        targets.append(owner_id)
+    for adm in admins:
+        targets.append(adm["user_id"])
+        
+    targets = list(set(targets))
+    
+    for target in targets:
+        try:
+            bot.send_message(target, text, parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"Failed to send failure notification to admin {target}: {e}")
+
 def scheduler_thread():
-    """Background thread that manages and executes the schedule."""
-    global scheduled_news, scheduled_activities, scheduled_analysis, scheduled_date
+    """Background thread that manages and executes the schedule using SQLite persistence."""
     logging.info("Scheduler thread started.")
     
     generate_daily_schedule()
     
-    executed_news = set()
-    executed_activities = set()
-    executed_analysis = set()
-    
-    now = get_berlin_now()
-    with schedule_lock:
-        for t in scheduled_news:
-            if t < now:
-                executed_news.add(t)
-        for t in scheduled_activities:
-            if t < now:
-                executed_activities.add(t)
-        for t in scheduled_analysis:
-            if t < now:
-                executed_analysis.add(t)
-                
     while True:
         try:
             now = get_berlin_now()
             today = now.date()
             
-            if today != scheduled_date:
-                generate_daily_schedule()
-                executed_news.clear()
-                executed_activities.clear()
-                executed_analysis.clear()
-                
-            trigger_news = []
-            trigger_activities = []
-            trigger_analysis = []
+            # Ensure daily schedule exists for today (runs daily date check)
+            generate_daily_schedule()
             
-            with schedule_lock:
-                for t in scheduled_news:
-                    if t <= now and t not in executed_news:
-                        trigger_news.append(t)
-                for t in scheduled_activities:
-                    if t <= now and t not in executed_activities:
-                        trigger_activities.append(t)
-                for t in scheduled_analysis:
-                    if t <= now and t not in executed_analysis:
-                        trigger_analysis.append(t)
-                        
-            # Trigger News
-            for t in trigger_news:
-                logging.info(f"Triggering scheduled news post ({t.strftime('%H:%M')})")
-                run_publish_cycle_by_type("news")
-                executed_news.add(t)
+            # Query for pending posts that are due
+            pending_posts = get_pending_scheduled_posts(now)
+            
+            if pending_posts:
+                # Trigger only the first pending post
+                first_post = pending_posts[0]
+                post_id = first_post["id"]
+                post_type = first_post["post_type"]
+                post_time_str = first_post["post_time"]
                 
-            # Trigger Activities
-            for t in trigger_activities:
-                logging.info(f"Triggering scheduled activity post ({t.strftime('%H:%M')})")
-                run_publish_cycle_by_type("activity")
-                executed_activities.add(t)
+                logging.info(f"Triggering scheduled {post_type} post (ID: {post_id}, scheduled for {post_time_str})")
                 
-            # Trigger Market Analysis
-            for t in trigger_analysis:
-                logging.info(f"Triggering scheduled market analysis post ({t.strftime('%H:%M')})")
-                run_market_analysis_cycle()
-                executed_analysis.add(t)
+                success = False
+                if post_type == "news":
+                    success = run_publish_cycle_by_type("news")
+                elif post_type == "activity":
+                    success = run_publish_cycle_by_type("activity")
+                elif post_type == "analysis":
+                    success = run_market_analysis_cycle()
+                    
+                if success:
+                    mark_scheduled_post_executed(post_id)
+                    logging.info(f"Scheduled {post_type} post (ID: {post_id}) executed successfully.")
+                else:
+                    # Failed: reschedule post to 30 minutes in the future
+                    new_time = now + timedelta(minutes=30)
+                    reschedule_scheduled_post(post_id, new_time)
+                    logging.info(f"Scheduled {post_type} post (ID: {post_id}) failed. Rescheduled to {new_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    notify_admins_of_failure(post_type)
+                
+                # Space out any remaining pending posts (e.g. if bot was offline for hours)
+                # to prevent back-to-back spam in the channel.
+                for idx, post in enumerate(pending_posts[1:], 1):
+                    spaced_time = now + timedelta(minutes=idx * 10)
+                    reschedule_scheduled_post(post["id"], spaced_time)
+                    logging.info(f"Spaced out pending post ID {post['id']} ({post['post_type']}) to {spaced_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # Regenerate daily schedule list globals to keep /status command and globals in sync
+                # This guarantees that the rescheduled/updated times appear correctly in /status.
+                generate_daily_schedule()
                 
             time.sleep(30)
         except Exception as e:
             logging.error(f"Error in scheduler_thread: {e}")
-            time.sleep(60)
+            time.sleep(30)
+
 
 def breaking_news_monitor_thread():
     """Background thread that monitors RSS feeds for breaking keywords and publishes instantly."""
@@ -1150,7 +1261,7 @@ def handle_analytics_command(message):
 @bot.message_handler(commands=["regenerate"])
 @admin_only
 def handle_regenerate(message):
-    generate_daily_schedule()
+    generate_daily_schedule(force=True)
     bot.reply_to(message, "🔄 Розклад на сьогодні успішно перегенеровано на основі актуальних налаштувань!")
 
 # Map Text Buttons
@@ -1197,9 +1308,13 @@ def handle_menu_buttons(message):
 @bot.message_handler(commands=["status"])
 @admin_only
 def handle_status(message):
-    global scheduled_news, scheduled_activities, scheduled_analysis, scheduled_date
     try:
         now = get_berlin_now()
+        today = now.date()
+        
+        # Ensure daily schedule exists for today in DB
+        generate_daily_schedule()
+        
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM published_posts")
@@ -1207,16 +1322,39 @@ def handle_status(message):
             cursor.execute("SELECT COUNT(*) FROM rss_feeds")
             feed_count = cursor.fetchone()[0]
             
-        with schedule_lock:
-            news_str = ", ".join([f"{t.strftime('%H:%M')}{'✓' if t in scheduled_news and t < now else ''}" for t in scheduled_news])
-            act_str = ", ".join([f"{t.strftime('%H:%M')}{'✓' if t in scheduled_activities and t < now else ''}" for t in scheduled_activities])
-            an_str = ", ".join([f"{t.strftime('%H:%M')}{'✓' if t in scheduled_analysis and t < now else ''}" for t in scheduled_analysis])
-            curr_date = scheduled_date
+            cursor.execute(
+                "SELECT post_time, post_type, is_executed FROM daily_schedule "
+                "WHERE date(post_time) = ? ORDER BY post_time ASC",
+                (today.isoformat(),)
+            )
+            rows = cursor.fetchall()
             
+        news_list = []
+        activity_list = []
+        analysis_list = []
+        
+        for row in rows:
+            dt = datetime.strptime(row["post_time"], '%Y-%m-%d %H:%M:%S')
+            time_str = dt.strftime('%H:%M')
+            executed_indicator = '✓' if row["is_executed"] == 1 else ''
+            formatted = f"{time_str}{executed_indicator}"
+            
+            ptype = row["post_type"]
+            if ptype == "news":
+                news_list.append(formatted)
+            elif ptype == "activity":
+                activity_list.append(formatted)
+            elif ptype == "analysis":
+                analysis_list.append(formatted)
+                
+        news_str = ", ".join(news_list) if news_list else "немає"
+        act_str = ", ".join(activity_list) if activity_list else "немає"
+        an_str = ", ".join(analysis_list) if analysis_list else "немає"
+        
         status_msg = (
             f"🤖 <b>Статус Crypto Publisher Bot:</b>\n\n"
             f"📊 Посилань в БД: <code>{db_count}</code> | Джерел: <code>{feed_count}</code>\n"
-            f"📅 Розклад на сьогодні ({curr_date}):\n"
+            f"📅 Розклад на сьогодні ({today.strftime('%Y-%m-%d')}):\n"
             f"📰 <b>Новини:</b> {news_str}\n"
             f"🎁 <b>Активності:</b> {act_str}\n"
             f"📊 <b>Аналітика:</b> {an_str}\n\n"

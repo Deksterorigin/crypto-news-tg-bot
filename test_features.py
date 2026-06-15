@@ -247,5 +247,153 @@ class TestNewFeatures(unittest.TestCase):
         mock_delete_admin.assert_called_with(987654321)
         self.assertIn("успішно видалено", mock_send_msg.call_args[0][1])
 
+    def test_daily_schedule_persistence(self):
+        from db import get_connection
+        from config import get_berlin_now
+        
+        today_str = get_berlin_now().date().isoformat()
+        
+        # 1. Clear today's schedule first
+        with get_connection() as conn:
+            conn.execute("DELETE FROM daily_schedule WHERE date(post_time) = ?", (today_str,))
+            conn.commit()
+            
+        # 2. Generate new schedule (force=False)
+        bot.generate_daily_schedule(force=False)
+        
+        # Verify entries exist
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, post_time, post_type FROM daily_schedule WHERE date(post_time) = ? ORDER BY id ASC", (today_str,))
+            rows1 = [dict(row) for row in cursor.fetchall()]
+            
+        self.assertGreater(len(rows1), 0)
+        
+        # 3. Call generate_daily_schedule(force=False) again, check they are persistent (not deleted/regenerated)
+        bot.generate_daily_schedule(force=False)
+        
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, post_time, post_type FROM daily_schedule WHERE date(post_time) = ? ORDER BY id ASC", (today_str,))
+            rows2 = [dict(row) for row in cursor.fetchall()]
+            
+        self.assertEqual(rows1, rows2)
+        
+        # 4. Force regeneration, check that they are modified/different
+        bot.generate_daily_schedule(force=True)
+        
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, post_time, post_type FROM daily_schedule WHERE date(post_time) = ? ORDER BY id ASC", (today_str,))
+            rows3 = [dict(row) for row in cursor.fetchall()]
+            
+        # Since force=True deletes and recreates, the primary key IDs should be different (higher because of AUTOINCREMENT)
+        ids1 = [r["id"] for r in rows1]
+        ids3 = [r["id"] for r in rows3]
+        self.assertNotEqual(ids1, ids3)
+
+    @patch('bot.time.sleep', side_effect=KeyboardInterrupt)
+    @patch('bot.run_publish_cycle_by_type', return_value=True)
+    def test_scheduler_catchup_spacing(self, mock_publish, mock_sleep):
+        from db import get_connection
+        from datetime import datetime, timedelta
+        from config import get_berlin_now
+        
+        now = get_berlin_now()
+        today_str = now.date().isoformat()
+        
+        # 1. Clear and insert 3 pending overdue posts
+        with get_connection() as conn:
+            conn.execute("DELETE FROM daily_schedule WHERE date(post_time) = ?", (today_str,))
+            
+            # Post 1 (overdue by 2 hours)
+            time1 = (now - timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S')
+            conn.execute("INSERT INTO daily_schedule (post_time, post_type, is_executed) VALUES (?, 'news', 0)", (time1,))
+            
+            # Post 2 (overdue by 1.5 hours)
+            time2 = (now - timedelta(hours=1.5)).strftime('%Y-%m-%d %H:%M:%S')
+            conn.execute("INSERT INTO daily_schedule (post_time, post_type, is_executed) VALUES (?, 'activity', 0)", (time2,))
+            
+            # Post 3 (overdue by 1 hour)
+            time3 = (now - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+            conn.execute("INSERT INTO daily_schedule (post_time, post_type, is_executed) VALUES (?, 'news', 0)", (time3,))
+            
+            conn.commit()
+            
+        # 2. Run scheduler loop once
+        try:
+            bot.scheduler_thread()
+        except KeyboardInterrupt:
+            pass
+            
+        # 3. Verify that the first post was executed (marked is_executed=1)
+        # And the remaining two were spaced out (still is_executed=0, but rescheduled by 10 and 20 mins)
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, post_time, post_type, is_executed FROM daily_schedule WHERE date(post_time) = ? ORDER BY id ASC", (today_str,))
+            rows = [dict(row) for row in cursor.fetchall()]
+            
+        # We inserted 3 posts, let's verify their status
+        self.assertEqual(len(rows), 3)
+        
+        # First post executed successfully
+        self.assertEqual(rows[0]["is_executed"], 1)
+        self.assertEqual(rows[0]["post_type"], "news")
+        
+        # Second post was spaced out (now + 10 mins)
+        self.assertEqual(rows[1]["is_executed"], 0)
+        self.assertEqual(rows[1]["post_type"], "activity")
+        expected_time2 = (now + timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M')
+        self.assertTrue(rows[1]["post_time"].startswith(expected_time2))
+        
+        # Third post was spaced out (now + 20 mins)
+        self.assertEqual(rows[2]["is_executed"], 0)
+        self.assertEqual(rows[2]["post_type"], "news")
+        expected_time3 = (now + timedelta(minutes=20)).strftime('%Y-%m-%d %H:%M')
+        self.assertTrue(rows[2]["post_time"].startswith(expected_time3))
+
+    @patch('bot.time.sleep', side_effect=KeyboardInterrupt)
+    @patch('bot.run_publish_cycle_by_type', return_value=False)
+    @patch('bot.notify_admins_of_failure')
+    def test_scheduler_failure_rescheduling(self, mock_notify, mock_publish, mock_sleep):
+        from db import get_connection
+        from datetime import datetime, timedelta
+        from config import get_berlin_now
+        
+        now = get_berlin_now()
+        today_str = now.date().isoformat()
+        
+        # 1. Clear and insert 1 pending overdue post
+        with get_connection() as conn:
+            conn.execute("DELETE FROM daily_schedule WHERE date(post_time) = ?", (today_str,))
+            # Post overdue by 15 mins
+            time1 = (now - timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
+            conn.execute("INSERT INTO daily_schedule (post_time, post_type, is_executed) VALUES (?, 'news', 0)", (time1,))
+            conn.commit()
+            
+        # 2. Run scheduler loop once
+        try:
+            bot.scheduler_thread()
+        except KeyboardInterrupt:
+            pass
+            
+        # 3. Verify failure behavior:
+        # - The post is NOT marked is_executed=1 (remains 0)
+        # - The post's post_time is pushed by 30 minutes (now + 30 mins)
+        # - Admin notification helper was called
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, post_time, post_type, is_executed FROM daily_schedule WHERE date(post_time) = ? ORDER BY id ASC", (today_str,))
+            rows = [dict(row) for row in cursor.fetchall()]
+            
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["is_executed"], 0) # Remained 0
+        expected_reschedule = (now + timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M')
+        self.assertTrue(rows[0]["post_time"].startswith(expected_reschedule))
+        
+        # Admin notification called
+        self.assertTrue(mock_notify.called)
+        mock_notify.assert_called_with("news")
+
 if __name__ == "__main__":
     unittest.main()

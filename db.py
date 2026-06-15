@@ -69,6 +69,16 @@ def init_db():
                 PRIMARY KEY (channel_id, date)
             )
         """)
+        
+        # Create daily_schedule table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_time TEXT,
+                post_type TEXT,
+                is_executed INTEGER DEFAULT 0
+            )
+        """)
         conn.commit()
         
         # Migration: Check if was_posted column exists in published_posts table, if not add it

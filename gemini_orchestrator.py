@@ -305,12 +305,41 @@ class GeminiOrchestrator:
 def compress_context(prompt: str, max_chars: int = 15000) -> str:
     """
     Utility function to compress the input prompt size to fit within strict token limits.
-    Truncates text if it exceeds the specified character limit, keeping the structure.
+    Compresses prompt by reducing the items list if it's JSON, not by raw string truncation.
     """
     if len(prompt) <= max_chars:
         return prompt
     
-    logger.info(f"Prompt length {len(prompt)} exceeds limit {max_chars}. Compressing...")
-    # Keep the header intact and truncate body items
+    logger.info(f"Prompt length {len(prompt)} exceeds limit {max_chars}. Compressing by reducing items...")
+    
+    try:
+        import json
+        parts = prompt.split("\n\n", 1)
+        if len(parts) == 2:
+            header, json_str = parts
+            data = json.loads(json_str)
+            if "items_to_select_from" in data and isinstance(data["items_to_select_from"], list):
+                items = data["items_to_select_from"]
+                original_count = len(items)
+                while len(items) > 1:
+                    items.pop()
+                    new_json = json.dumps(data, ensure_ascii=False, indent=2)
+                    new_prompt = f"{header}\n\n{new_json}"
+                    if len(new_prompt) <= max_chars:
+                        logger.info(f"Compressed prompt from {original_count} to {len(items)} items. Length: {len(new_prompt)}")
+                        return new_prompt
+                
+                # If even 1 item is too long, try removing recently_published_titles if present
+                if "recently_published_titles" in data:
+                    del data["recently_published_titles"]
+                    new_json = json.dumps(data, ensure_ascii=False, indent=2)
+                    new_prompt = f"{header}\n\n{new_json}"
+                    if len(new_prompt) <= max_chars:
+                        logger.info("Removed recently_published_titles to fit context.")
+                        return new_prompt
+    except Exception as e:
+        logger.warning(f"Failed to compress context via JSON parsing: {e}. Falling back to raw truncation.")
+    
+    # Ultimate fallback if parsing fails or structure doesn't match
     half_limit = max_chars // 2
     return prompt[:half_limit] + "\n\n... [CONTEXT TRUNCATED FOR TOKEN OPTIMIZATION] ...\n\n" + prompt[-half_limit:]

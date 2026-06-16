@@ -383,6 +383,8 @@ async def generate_market_analysis(prices: dict, headlines: List[str]) -> str:
         logging.error(f"Error generating market analysis: {e}")
         raise e
 
+urgency_errors_counter = 0
+
 async def is_news_highly_urgent(title: str, summary: str) -> bool:
     """Uses Gemini to check if a news item is truly urgent breaking news (market-moving, major exploit, etc.)."""
     prompt = (
@@ -410,6 +412,7 @@ async def is_news_highly_urgent(title: str, summary: str) -> bool:
         data = robust_json_loads(result_text)
         return data.get("is_really_urgent", False)
     except Exception as e:
-        logging.error(f"Error validating breaking news urgency: {e}")
-        # Default fallback to True if validation fails to not miss actual breaking news
-        return True
+        global urgency_errors_counter
+        urgency_errors_counter += 1
+        logging.error(f"Error validating breaking news urgency for '{title}': {e} (Errors: {urgency_errors_counter})")
+        return False  # Safe fallback: better to miss one urgent post than to spam the channel with non-urgent news

@@ -39,6 +39,15 @@ from db import (
 )
 
 db_lock = asyncio.Lock()
+_owner_bootstrap_lock = asyncio.Lock()
+
+_background_tasks: set = set()
+
+def create_tracked_task(coro):
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 async def run_db(func, *args, **kwargs):
     async with db_lock:
@@ -140,9 +149,15 @@ def owner_only(func):
     async def wrapper(message, *args, **kwargs):
         user_id = message.from_user.id
         
-        owner_id = await get_owner_id()
-        if owner_id is None:
-            await set_owner_id(user_id)
+        is_new_owner = False
+        async with _owner_bootstrap_lock:
+            owner_id = await get_owner_id()
+            if owner_id is None:
+                await set_owner_id(user_id)
+                owner_id = user_id
+                is_new_owner = True
+        
+        if is_new_owner:
             await bot.reply_to(
                 message, 
                 f"👑 <b>Вітаємо!</b>\nВи автоматично зареєстровані як <b>Власник</b> цього бота (Ваш ID: <code>{user_id}</code>).", 
@@ -901,7 +916,7 @@ async def process_add_channel(message):
         name = parts[1].strip()
         
         if await add_channel(ch_id, name):
-            await bot.send_message(message.chat.id, f"✅ Канал <b>{name}</b> успішно додано!", parse_mode="HTML", reply_markup=await main_menu_keyboard(message.from_user.id))
+            await bot.send_message(message.chat.id, f"✅ Канал <code>{ch_id}</code> успішно додано.", parse_mode="HTML", reply_markup=await main_menu_keyboard(message.from_user.id))
         else:
             await bot.send_message(message.chat.id, "❌ Не вдалося додати канал. Перевірте формат.")
     except Exception as e:
@@ -931,7 +946,7 @@ async def process_add_feed(message):
         url = parts[1].strip()
         
         if await add_rss_feed(name, url):
-            await bot.send_message(message.chat.id, f"✅ Джерело <b>{name}</b> додано!", parse_mode="HTML", reply_markup=await main_menu_keyboard(message.from_user.id))
+            await bot.send_message(message.chat.id, f"✅ Джерело <b>{name}</b> (<code>{url}</code>) успішно додано.", parse_mode="HTML", reply_markup=await main_menu_keyboard(message.from_user.id))
         else:
             await bot.send_message(message.chat.id, "❌ Не вдалося додати джерело. Можливо, воно вже є.")
     except Exception as e:
@@ -1262,7 +1277,7 @@ async def handle_inline_callbacks(call):
         else:
             proxies_list = [p.strip() for p in proxies_str.replace("\n", ",").split(",") if p.strip()]
             await bot.answer_callback_query(call.id, "⏳ Початок перевірки проксі...")
-            asyncio.create_task(
+            create_tracked_task(
                 check_proxies_job(chat_id, call.message.message_id, proxies_list)
             )
     elif action == "add_admin_btn":
@@ -1285,29 +1300,29 @@ async def handle_inline_callbacks(call):
     # Test Actions (Dry Run)
     elif action == "t_news":
         await bot.send_message(chat_id, "⏳ Тест: Збір та підготовка новини...")
-        asyncio.create_task(run_publish_cycle_by_type("news", chat_id))
+        create_tracked_task(run_publish_cycle_by_type("news", chat_id))
         await bot.answer_callback_query(call.id)
     elif action == "t_activity":
         await bot.send_message(chat_id, "⏳ Тест: Збір та підготовка активності...")
-        asyncio.create_task(run_publish_cycle_by_type("activity", chat_id))
+        create_tracked_task(run_publish_cycle_by_type("activity", chat_id))
         await bot.answer_callback_query(call.id)
     elif action == "t_analysis":
         await bot.send_message(chat_id, "⏳ Тест: Збір ринкових даних та аналітики...")
-        asyncio.create_task(run_market_analysis_cycle(test_chat_id=chat_id))
+        create_tracked_task(run_market_analysis_cycle(test_chat_id=chat_id))
         await bot.answer_callback_query(call.id)
         
     # Force Publish Actions (Live)
     elif action == "p_news":
         await bot.send_message(chat_id, "⏳ Публікація Новини у канали...")
-        asyncio.create_task(run_publish_cycle_by_type("news", None))
+        create_tracked_task(run_publish_cycle_by_type("news", None))
         await bot.answer_callback_query(call.id)
     elif action == "p_activity":
         await bot.send_message(chat_id, "⏳ Публікація Активності у канали...")
-        asyncio.create_task(run_publish_cycle_by_type("activity", None))
+        create_tracked_task(run_publish_cycle_by_type("activity", None))
         await bot.answer_callback_query(call.id)
     elif action == "p_analysis":
-        await bot.send_message(chat_id, "⏳ Публікація Аналізу Ринку у канали...")
-        asyncio.create_task(run_market_analysis_cycle(None))
+        await bot.send_message(chat_id, "⏳ Публікація Analizu Rinku u kanaly...")
+        create_tracked_task(run_market_analysis_cycle(None))
         await bot.answer_callback_query(call.id)
 
 # --- REPLY KEYBOARD COMMAND HANDLERS ---
@@ -1315,18 +1330,24 @@ async def handle_inline_callbacks(call):
 @bot.message_handler(commands=["start", "help"])
 async def handle_start(message):
     user_id = message.from_user.id
-    owner_id = await get_owner_id()
     
+    is_new_owner = False
+    async with _owner_bootstrap_lock:
+        owner_id = await get_owner_id()
+        if owner_id is None:
+            await set_owner_id(user_id)
+            owner_id = user_id
+            is_new_owner = True
+            
     # Bootstrap Owner
-    if owner_id is None:
-        await set_owner_id(user_id)
-        owner_id = user_id
+    if is_new_owner:
         await bot.send_message(
             message.chat.id, 
             f"👑 <b>Вітаємо!</b>\nВи автоматично зареєстровані як <b>Власник</b> цього бота (Ваш ID: <code>{user_id}</code>).", 
             parse_mode="HTML",
             reply_markup=await main_menu_keyboard(user_id)
         )
+        return
         
     if not await is_admin(user_id):
         await bot.reply_to(
@@ -1545,13 +1566,13 @@ async def main():
     web_t.start()
     
     # 2. Start Self-pinging keep-alive task
-    asyncio.create_task(keep_alive_task())
+    create_tracked_task(keep_alive_task())
     
     # 3. Start background scheduler task
-    asyncio.create_task(scheduler_task())
+    create_tracked_task(scheduler_task())
     
     # 3b. Start breaking news monitor task
-    asyncio.create_task(breaking_news_monitor_task())
+    create_tracked_task(breaking_news_monitor_task())
     
     # 4. Start telegram bot polling
     logging.info("Telegram Bot starts polling...")

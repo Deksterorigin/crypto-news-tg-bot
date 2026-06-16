@@ -1132,6 +1132,19 @@ async def handle_list_feeds(message):
         text = "🔗 <b>Активні RSS-джерела:</b>\n\n" + "\n\n".join(lines)
     await bot.send_message(message.chat.id, text, parse_mode="HTML")
 
+from typing import Tuple
+
+def _sync_get_analytics_db_data(ch_id: str, member_count: int) -> Tuple[Dict[str, Any], int]:
+    """Saves member count stats and retrieves analytics history and total post counts from database."""
+    from db import record_channel_stats, get_channel_analytics
+    record_channel_stats(ch_id, member_count)
+    analytics = get_channel_analytics(ch_id)
+    with _sync_get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM published_posts WHERE was_posted = 1")
+        total_posts = cursor.fetchone()[0]
+    return analytics, total_posts
+
 async def handle_analytics(message):
     channels = await get_channels()
     if not channels:
@@ -1146,20 +1159,15 @@ async def handle_analytics(message):
         
         try:
             member_count = await bot.get_chat_member_count(ch_id)
-            from db import record_channel_stats, get_channel_analytics
-            record_channel_stats(ch_id, member_count)
             
-            analytics = get_channel_analytics(ch_id)
+            # Asynchronously offload blocking db execution
+            analytics, total_posts = await run_db(_sync_get_analytics_db_data, ch_id, member_count)
+            
             current = analytics.get("current", member_count)
             growth = analytics.get("growth_7d", 0)
             
             growth_str = f"+{growth}" if growth > 0 else f"{growth}"
             
-            with get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM published_posts WHERE was_posted = 1")
-                total_posts = cursor.fetchone()[0]
-                
             response_lines.append(
                 f"📢 <b>{ch_name}</b> (<code>{ch_id}</code>):\n"
                 f"👥 Підписників: <b>{current}</b> ({growth_str} за 7 днів)\n"
@@ -1355,7 +1363,7 @@ async def handle_start(message):
 @bot.message_handler(commands=["analytics"])
 @admin_only
 async def handle_analytics_command(message):
-    handle_analytics(message)
+    await handle_analytics(message)
 
 @bot.message_handler(commands=["regenerate"])
 @admin_only
@@ -1374,17 +1382,17 @@ async def handle_menu_buttons(message):
     btn_text = message.text
     
     if btn_text == "📊 Статус":
-        handle_status(message)
+        await handle_status(message)
         
     elif btn_text == "📈 Аналітика":
-        handle_analytics(message)
+        await handle_analytics(message)
         
     elif btn_text == "⚙️ Налаштування":
         text, markup = await get_settings_menu()
         await bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
         
     elif btn_text == "🔄 Оновити розклад":
-        handle_regenerate(message)
+        await handle_regenerate(message)
         
     elif btn_text == "📢 Канали":
         text, markup = await get_channels_menu()
@@ -1395,13 +1403,13 @@ async def handle_menu_buttons(message):
         await bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
         
     elif btn_text == "👥 Адміністратори":
-        handle_list_admins(message)
+        await handle_list_admins(message)
         
     elif btn_text == "💾 Резервна копія БД":
-        handle_backup_db(message)
+        await handle_backup_db(message)
         
     elif btn_text == "ℹ️ Довідка":
-        handle_start(message)
+        await handle_start(message)
         
     elif btn_text == "📝 Тест-Пости":
         await bot.send_message(
@@ -1419,6 +1427,23 @@ async def handle_menu_buttons(message):
             reply_markup=get_publish_menu()
         )
 
+def _sync_get_status_data(today_iso: str):
+    """Retrieves status numbers and daily schedule from SQLite database safely in worker thread."""
+    with _sync_get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM published_posts")
+        db_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM rss_feeds")
+        feed_count = cursor.fetchone()[0]
+        
+        cursor.execute(
+            "SELECT post_time, post_type, is_executed FROM daily_schedule "
+            "WHERE date(post_time) = ? ORDER BY post_time ASC",
+            (today_iso,)
+        )
+        rows = [dict(row) for row in cursor.fetchall()]
+    return db_count, feed_count, rows
+
 # Fallback direct commands (keep them active for compatibility)
 @bot.message_handler(commands=["status"])
 @admin_only
@@ -1430,20 +1455,8 @@ async def handle_status(message):
         # Ensure daily schedule exists for today in DB
         await generate_daily_schedule()
         
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM published_posts")
-            db_count = cursor.fetchone()[0]
-            cursor.execute("SELECT COUNT(*) FROM rss_feeds")
-            feed_count = cursor.fetchone()[0]
-            
-            cursor.execute(
-                "SELECT post_time, post_type, is_executed FROM daily_schedule "
-                "WHERE date(post_time) = ? ORDER BY post_time ASC",
-                (today.isoformat(),)
-            )
-            rows = cursor.fetchall()
-            
+        db_count, feed_count, rows = await run_db(_sync_get_status_data, today.isoformat())
+        
         news_list = []
         activity_list = []
         analysis_list = []
@@ -1482,24 +1495,24 @@ async def handle_status(message):
 @bot.message_handler(commands=["list_feeds"])
 @admin_only
 async def handle_list_feeds_command(message):
-    handle_list_feeds(message)
+    await handle_list_feeds(message)
 
 # --- OWNER ONLY: ACCESS MANAGEMENT COMMANDS ---
 
 @bot.message_handler(commands=["list_admins"])
 @owner_only
 async def handle_list_admins_cmd(message):
-    handle_list_admins(message)
+    await handle_list_admins(message)
 
 @bot.message_handler(commands=["add_admin"])
 @owner_only
 async def handle_add_admin_cmd(message):
-    handle_add_admin(message)
+    await handle_add_admin(message)
 
 @bot.message_handler(commands=["delete_admin"])
 @owner_only
 async def handle_delete_admin_cmd(message):
-    handle_delete_admin(message)
+    await handle_delete_admin(message)
 
 @bot.message_handler(commands=["backup_db"])
 @owner_only

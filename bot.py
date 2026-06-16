@@ -35,7 +35,8 @@ from db import (
     set_setting as _sync_set_setting,
     get_channels as _sync_get_channels,
     add_channel as _sync_add_channel,
-    delete_channel as _sync_delete_channel
+    delete_channel as _sync_delete_channel,
+    is_already_published as _sync_is_already_published
 )
 
 db_lock = asyncio.Lock()
@@ -98,14 +99,73 @@ async def get_rss_feeds(*args, **kwargs):
 async def mark_as_published(*args, **kwargs):
     return await run_db(_sync_mark_as_published, *args, **kwargs)
 
-def get_connection(*args, **kwargs):
-    return _sync_get_connection(*args, **kwargs)
+async def is_already_published(*args, **kwargs):
+    return await run_db(_sync_is_already_published, *args, **kwargs)
+
+import db
+import threading
+from telebot.handler_backends import CancelUpdate
+
+_db_thread_lock = threading.Lock()
+_orig_get_connection = db.get_connection
+
+class ThreadSafeConnectionContext:
+    def __init__(self):
+        self.conn = None
+
+    def __enter__(self):
+        _db_thread_lock.acquire()
+        try:
+            self.conn = _orig_get_connection()
+            return self.conn
+        except Exception:
+            _db_thread_lock.release()
+            raise
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if self.conn:
+                self.conn.close()
+        finally:
+            _db_thread_lock.release()
+
+db.get_connection = ThreadSafeConnectionContext
+_sync_get_connection = ThreadSafeConnectionContext
+
+# Custom implementation of next step handlers for AsyncTeleBot
+_next_step_handlers = {}  # chat_id -> (callback, args, kwargs)
+
+def custom_register_next_step_handler(message, callback, *args, **kwargs):
+    chat_id = message.chat.id
+    _next_step_handlers[chat_id] = (callback, args, kwargs)
+
+async def custom_clear_step_handler_by_chat_id(chat_id):
+    _next_step_handlers.pop(chat_id, None)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Initialize Telegram Bot
 bot = AsyncTeleBot(BOT_TOKEN)
+bot.register_next_step_handler = custom_register_next_step_handler
+bot.clear_step_handler_by_chat_id = custom_clear_step_handler_by_chat_id
+
+from telebot.asyncio_handler_backends import BaseMiddleware
+
+class NextStepMiddleware(BaseMiddleware):
+    def __init__(self):
+        super().__init__()
+        self.update_sensitive = True
+        self.update_types = ['message']
+
+    async def pre_process_message(self, message, data):
+        chat_id = message.chat.id
+        if chat_id in _next_step_handlers:
+            callback, args, kwargs = _next_step_handlers.pop(chat_id)
+            create_tracked_task(callback(message, *args, **kwargs))
+            return CancelUpdate()
+
+bot.setup_middleware(NextStepMiddleware())
 
 # Thread-safe locks and global state
 schedule_lock = asyncio.Lock()
@@ -122,10 +182,15 @@ def admin_only(func):
     async def wrapper(message, *args, **kwargs):
         user_id = message.from_user.id
         
-        # Bootstrap: if no owner exists, register the first user
-        owner_id = await get_owner_id()
-        if owner_id is None:
-            await set_owner_id(user_id)
+        is_new_owner = False
+        async with _owner_bootstrap_lock:
+            owner_id = await get_owner_id()
+            if owner_id is None:
+                await set_owner_id(user_id)
+                owner_id = user_id
+                is_new_owner = True
+                
+        if is_new_owner:
             await bot.reply_to(
                 message, 
                 f"👑 <b>Вітаємо!</b>\nВи автоматично зареєстровані як <b>Власник</b> цього бота (Ваш ID: <code>{user_id}</code>).", 
@@ -242,51 +307,51 @@ async def fetch_coingecko_prices() -> dict:
 # --- SCHEDULER & PUBLISHING LOGIC ---
 
 def _generate_daily_schedule_db_ops(force, now, today):
-    # Check count
-    count = 0
     try:
         with _sync_get_connection() as conn:
             cursor = conn.cursor()
+            
+            # Check count
             cursor.execute("SELECT COUNT(*) FROM daily_schedule WHERE date(post_time) = ?", (today.isoformat(),))
             count = cursor.fetchone()[0]
-    except Exception as e:
-        logging.error(f"Error checking schedule in DB: {e}")
-        
-    if count == 0 or force:
-        try:
-            if force:
-                with _sync_get_connection() as conn:
+            
+            if count == 0 or force:
+                if force:
                     conn.execute("DELETE FROM daily_schedule WHERE date(post_time) = ?", (today.isoformat(),))
                     conn.commit()
                     logging.info(f"Forced regeneration: deleted today's schedule for {today}")
-            
-            # Load dynamic configurations
-            news_count = int(_sync_get_setting("news_count", "6"))
-            activity_count = int(_sync_get_setting("activity_count", "4"))
-            start_hour = int(_sync_get_setting("start_hour", "10"))
-            end_hour = int(_sync_get_setting("end_hour", "22"))
-            
-            window_minutes = (end_hour - start_hour) * 60
-            start_offset = start_hour * 60
-            
-            news_times = []
-            news_segment = float(window_minutes) / news_count
-            for i in range(news_count):
-                offset = random.randint(int(i * news_segment), int((i + 1) * news_segment) - 1)
-                dt = datetime.combine(today, datetime.min.time()) + timedelta(minutes=start_offset + offset)
-                news_times.append(dt)
                 
-            activity_times = []
-            activity_segment = float(window_minutes) / activity_count
-            for i in range(activity_count):
-                offset = random.randint(int(i * activity_segment), int((i + 1) * activity_segment) - 1)
-                dt = datetime.combine(today, datetime.min.time()) + timedelta(minutes=start_offset + offset)
-                activity_times.append(dt)
+                # Fetch settings using the same connection to avoid opening new ones
+                def get_setting_from_conn(key, default):
+                    cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+                    row = cursor.fetchone()
+                    return row[0] if row else default
                 
-            analysis_offset = random.randint(start_offset + 60, start_offset + 180)
-            analysis_dt = datetime.combine(today, datetime.min.time()) + timedelta(minutes=analysis_offset)
-            
-            with _sync_get_connection() as conn:
+                news_count = int(get_setting_from_conn("news_count", "6"))
+                activity_count = int(get_setting_from_conn("activity_count", "4"))
+                start_hour = int(get_setting_from_conn("start_hour", "10"))
+                end_hour = int(get_setting_from_conn("end_hour", "22"))
+                
+                window_minutes = (end_hour - start_hour) * 60
+                start_offset = start_hour * 60
+                
+                news_times = []
+                news_segment = float(window_minutes) / news_count
+                for i in range(news_count):
+                    offset = random.randint(int(i * news_segment), int((i + 1) * news_segment) - 1)
+                    dt = datetime.combine(today, datetime.min.time()) + timedelta(minutes=start_offset + offset)
+                    news_times.append(dt)
+                    
+                activity_times = []
+                activity_segment = float(window_minutes) / activity_count
+                for i in range(activity_count):
+                    offset = random.randint(int(i * activity_segment), int((i + 1) * activity_segment) - 1)
+                    dt = datetime.combine(today, datetime.min.time()) + timedelta(minutes=start_offset + offset)
+                    activity_times.append(dt)
+                    
+                analysis_offset = random.randint(start_offset + 60, start_offset + 180)
+                analysis_dt = datetime.combine(today, datetime.min.time()) + timedelta(minutes=analysis_offset)
+                
                 for dt in news_times:
                     is_exec = 1 if dt < now else 0
                     conn.execute(
@@ -305,21 +370,16 @@ def _generate_daily_schedule_db_ops(force, now, today):
                     (analysis_dt.strftime('%Y-%m-%d %H:%M:%S'), is_exec)
                 )
                 conn.commit()
-            logging.info(f"Daily schedules generated dynamically and saved to DB for {today}.")
-        except Exception as e:
-            logging.error(f"Error generating daily schedule: {e}")
-            
-    # Read rows
-    try:
-        with _sync_get_connection() as conn:
-            cursor = conn.cursor()
+                logging.info(f"Daily schedules generated dynamically and saved to DB for {today}.")
+                
             cursor.execute(
                 "SELECT post_time, post_type FROM daily_schedule WHERE date(post_time) = ? ORDER BY post_time ASC",
                 (today.isoformat(),)
             )
             return [dict(row) for row in cursor.fetchall()]
+            
     except Exception as e:
-        logging.error(f"Error syncing schedule globals: {e}")
+        logging.error(f"Error in _generate_daily_schedule_db_ops: {e}")
         return []
 
 async def generate_daily_schedule(force=False):
@@ -547,6 +607,9 @@ async def scheduler_task():
     
     while True:
         try:
+            if await get_setting("bot_stopped", "0") == "1":
+                await asyncio.sleep(30)
+                continue
             now = get_berlin_now()
             today = now.date()
             
@@ -600,12 +663,17 @@ async def scheduler_task():
             logging.error(f"Error in scheduler_task: {e}")
             await asyncio.sleep(30)
 
+scheduler_thread = scheduler_task
+
 
 async def breaking_news_monitor_task():
     """Background task that monitors RSS feeds for breaking keywords and publishes instantly."""
     logging.info("Breaking news monitor task started.")
     while True:
         try:
+            if await get_setting("bot_stopped", "0") == "1":
+                await asyncio.sleep(30)
+                continue
             # 1. Fetch breaking keywords
             keywords_str = await get_setting("breaking_keywords", "")
             keywords = [w.strip().lower() for w in keywords_str.split(",") if w.strip()]
@@ -625,10 +693,8 @@ async def breaking_news_monitor_task():
                     logging.info(f"Found {len(breaking_items)} potential breaking news items based on keywords.")
                     
                     actual_breaking_items = []
-                    from db import is_already_published as _sync_is_already_published
-                    
                     for item in breaking_items:
-                        is_pub = await run_db(_sync_is_already_published, item["link"])
+                        is_pub = await is_already_published(item["link"])
                         if is_pub:
                             continue
                         # Verify using Gemini urgency filter
@@ -640,7 +706,7 @@ async def breaking_news_monitor_task():
                     
                     if actual_breaking_items:
                         for item in actual_breaking_items:
-                            is_pub = await run_db(_sync_is_already_published, item["link"])
+                            is_pub = await is_already_published(item["link"])
                             if is_pub:
                                 continue
                             
@@ -843,7 +909,7 @@ async def check_cancel_command(message) -> bool:
     ]
     if message.text and (message.text.startswith("/") or message.text in menu_buttons):
         await bot.clear_step_handler_by_chat_id(chat_id=message.chat.id)
-        bot.process_new_messages([message])
+        await bot.process_new_messages([message])
         return True
     return False
 
@@ -868,7 +934,7 @@ async def process_set_act_count(message):
         if val <= 0 or val > 20:
             raise ValueError
         await set_setting("activity_count", str(val))
-        await bot.send_message(message.chat.id, f"✅ Кількість активнотей успішно змінена на <b>{val}</b> на день!", parse_mode="HTML", reply_markup=await main_menu_keyboard(message.from_user.id))
+        await bot.send_message(message.chat.id, f"✅ Кількість активностей успішно змінена на <b>{val}</b> на день!", parse_mode="HTML", reply_markup=await main_menu_keyboard(message.from_user.id))
     except ValueError:
         await bot.send_message(message.chat.id, "❌ Помилка. Введіть позитивне число (від 1 до 20):")
         bot.register_next_step_handler(message, process_set_act_count)
@@ -982,7 +1048,7 @@ async def process_edit_proxies(message):
     if val.lower() in ["none", "empty", "очистити", "-", "видалити"]:
         val = ""
     await set_setting("proxies", val)
-    await bot.send_message(message.chat.id, "✅ Список проксі успешно оновлено!", reply_markup=await main_menu_keyboard(message.from_user.id))
+    await bot.send_message(message.chat.id, "✅ Список проксі успішно оновлено!", reply_markup=await main_menu_keyboard(message.from_user.id))
 
 def format_proxy(proxy_str: str) -> str:
     """Ensures the proxy string has a scheme, defaulting to http://."""
@@ -1055,22 +1121,61 @@ async def check_proxies_job(chat_id, message_id, proxies_list):
         except Exception:
             pass
 
+def parse_admin_input(text: str):
+    """
+    Parses string input to extract user_id (int) and username (str).
+    Supports multiple formats like "[ID] [username]", "[username] [ID]", etc.
+    Raises ValueError if no valid numeric ID is found.
+    """
+    if not text:
+        raise ValueError("Вхідний текст порожній")
+    parts = text.strip().split()
+    if not parts:
+        raise ValueError("Вхідний текст порожній")
+    
+    user_id = None
+    username = ""
+    
+    for part in parts:
+        clean = part.strip()
+        if clean.startswith("@"):
+            continue
+        try:
+            val = int(clean)
+            user_id = val
+        except ValueError:
+            pass
+            
+    for part in parts:
+        clean = part.strip()
+        if clean.startswith("@"):
+            username = clean[1:]
+            break
+        try:
+            val = int(clean)
+            if val == user_id:
+                continue
+        except ValueError:
+            pass
+        username = clean
+        break
+        
+    if user_id is None:
+        raise ValueError("Не знайдено числовий ID користувача")
+    return user_id, username
+
 async def process_add_admin_btn(message):
     if await check_cancel_command(message):
         return
     try:
-        parts = message.text.strip().split()
-        if len(parts) < 1:
-            raise ValueError
-        user_id = int(parts[0])
-        username = parts[1] if len(parts) > 1 else ""
-        if username.startswith("@"):
-            username = username[1:]
+        if not message.text:
+            raise ValueError("Повідомлення не містить тексту")
+        user_id, username = parse_admin_input(message.text)
         if await add_admin(user_id, username):
             await bot.send_message(message.chat.id, f"✅ Адміністратора з ID <code>{user_id}</code> (@{username or 'немає'}) успішно додано!", parse_mode="HTML", reply_markup=await main_menu_keyboard(message.from_user.id))
         else:
             await bot.send_message(message.chat.id, "❌ Не вдалося додати адміністратора.")
-    except ValueError:
+    except Exception:
         await bot.send_message(message.chat.id, "❌ Помилка. Будь ласка, введіть числовий ID та Username (опціонально) через пробіл:")
         bot.register_next_step_handler(message, process_add_admin_btn)
 
@@ -1078,12 +1183,14 @@ async def process_delete_admin_btn(message):
     if await check_cancel_command(message):
         return
     try:
+        if not message.text:
+            raise ValueError("Повідомлення не містить тексту")
         user_id = int(message.text.strip())
         if await delete_admin(user_id):
             await bot.send_message(message.chat.id, f"✅ Адміністратора з ID <code>{user_id}</code> успішно видалено.", parse_mode="HTML", reply_markup=await main_menu_keyboard(message.from_user.id))
         else:
             await bot.send_message(message.chat.id, f"❌ Адміністратора з ID <code>{user_id}</code> не знайдено в базі.", parse_mode="HTML")
-    except ValueError:
+    except Exception:
         await bot.send_message(message.chat.id, "❌ Помилка. Будь ласка, введіть числовий ID адміністратора:")
         bot.register_next_step_handler(message, process_delete_admin_btn)
 
@@ -1109,18 +1216,19 @@ async def handle_list_admins(message):
 
 async def handle_add_admin(message):
     try:
+        if not message.text:
+            raise ValueError("Повідомлення не містить тексту")
+        text_without_command = ""
         parts = message.text.split()
-        if len(parts) < 2:
-            await bot.reply_to(message, "⚠️ Використовуйте: <code>/add_admin [ID] [Username]</code>", parse_mode="HTML")
-            return
-        user_id = int(parts[1])
-        username = parts[2] if len(parts) > 2 else ""
+        if len(parts) > 1:
+            text_without_command = " ".join(parts[1:])
+        user_id, username = parse_admin_input(text_without_command)
         if await add_admin(user_id, username):
             await bot.reply_to(message, f"✅ Користувача <code>{user_id}</code> (@{username or 'немає'}) додано до списку адміністраторів.", parse_mode="HTML")
         else:
             await bot.reply_to(message, "❌ Не вдалося додати адміністратора.")
     except Exception as e:
-        await bot.reply_to(message, f"❌ Помилка: {e}")
+        await bot.reply_to(message, f"❌ Помилка. Використовуйте: <code>/add_admin [ID] [Username]</code>\nДеталі: {e}", parse_mode="HTML")
 
 async def handle_delete_admin(message):
     try:
@@ -1219,7 +1327,7 @@ async def handle_inline_callbacks(call):
         bot.register_next_step_handler(msg, process_set_news_count)
         await bot.answer_callback_query(call.id)
     elif action == "set_act_count":
-        msg = await bot.send_message(chat_id, "🔢 Введіть нову кількість активностей на день (від 1 to 20):")
+        msg = await bot.send_message(chat_id, "🔢 Введіть нову кількість активностей на день (від 1 до 20):")
         bot.register_next_step_handler(msg, process_set_act_count)
         await bot.answer_callback_query(call.id)
     elif action == "set_start_hour":
@@ -1321,7 +1429,7 @@ async def handle_inline_callbacks(call):
         create_tracked_task(run_publish_cycle_by_type("activity", None))
         await bot.answer_callback_query(call.id)
     elif action == "p_analysis":
-        await bot.send_message(chat_id, "⏳ Публікація Analizu Rinku u kanaly...")
+        await bot.send_message(chat_id, "⏳ Публікація аналізу ринку у канали...")
         create_tracked_task(run_market_analysis_cycle(None))
         await bot.answer_callback_query(call.id)
 
@@ -1517,6 +1625,18 @@ async def handle_status(message):
 @admin_only
 async def handle_list_feeds_command(message):
     await handle_list_feeds(message)
+
+@bot.message_handler(commands=["stop"])
+@admin_only
+async def handle_stop_command(message):
+    await set_setting("bot_stopped", "1")
+    await bot.reply_to(message, "⏹️ Автопублікацію новин зупинено. Бот більше не буде публікувати пости автоматично.")
+
+@bot.message_handler(commands=["resume"])
+@admin_only
+async def handle_resume_command(message):
+    await set_setting("bot_stopped", "0")
+    await bot.reply_to(message, "▶️ Автопублікацію новин відновлено. Бот продовжить публікувати пости за розкладом.")
 
 # --- OWNER ONLY: ACCESS MANAGEMENT COMMANDS ---
 

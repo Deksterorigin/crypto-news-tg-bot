@@ -1,6 +1,7 @@
 import sys
 import unittest
 from unittest.mock import patch, MagicMock
+from datetime import datetime
 
 # Ensure project files are importable
 sys.path.append('.')
@@ -10,7 +11,7 @@ from config import requests_get_with_retry
 from fetcher import fetch_feed
 import bot
 
-class TestNewFeatures(unittest.TestCase):
+class TestNewFeatures(unittest.IsolatedAsyncioTestCase):
     
     def setUp(self):
         # Clear or reset owner_id in DB to avoid MagicMock contamination
@@ -204,7 +205,7 @@ class TestNewFeatures(unittest.TestCase):
 
     @patch('bot.requests.get')
     @patch('bot.bot.edit_message_text')
-    def test_check_proxies_job(self, mock_edit_msg, mock_get):
+    async def test_check_proxies_job(self, mock_edit_msg, mock_get):
         from bot import check_proxies_job
         
         # Mock successful check for one proxy, failure for another
@@ -214,7 +215,7 @@ class TestNewFeatures(unittest.TestCase):
         mock_get.side_effect = [mock_resp_success, Exception("Connection timeout")]
         
         proxies_list = ["1.2.3.4:8080", "http://5.6.7.8:8080"]
-        check_proxies_job(12345, 67890, proxies_list)
+        await check_proxies_job(12345, 67890, proxies_list)
         
         self.assertTrue(mock_edit_msg.called)
         final_call_args = mock_edit_msg.call_args[1]
@@ -226,7 +227,7 @@ class TestNewFeatures(unittest.TestCase):
     @patch('bot.add_admin')
     @patch('bot.delete_admin')
     @patch('bot.bot.send_message')
-    def test_admin_step_handlers(self, mock_send_msg, mock_delete_admin, mock_add_admin):
+    async def test_admin_step_handlers(self, mock_send_msg, mock_delete_admin, mock_add_admin):
         from bot import process_add_admin_btn, process_delete_admin_btn
         
         # Mock database actions
@@ -239,7 +240,7 @@ class TestNewFeatures(unittest.TestCase):
         mock_message_add.chat.id = 12345
         mock_message_add.from_user.id = 12345
         
-        process_add_admin_btn(mock_message_add)
+        await process_add_admin_btn(mock_message_add)
         mock_add_admin.assert_called_with(987654321, "test_user")
         self.assertTrue(mock_send_msg.called)
         self.assertIn("успішно додано", mock_send_msg.call_args[0][1])
@@ -250,11 +251,11 @@ class TestNewFeatures(unittest.TestCase):
         mock_message_delete.chat.id = 12345
         mock_message_delete.from_user.id = 12345
         
-        process_delete_admin_btn(mock_message_delete)
+        await process_delete_admin_btn(mock_message_delete)
         mock_delete_admin.assert_called_with(987654321)
         self.assertIn("успішно видалено", mock_send_msg.call_args[0][1])
 
-    def test_daily_schedule_persistence(self):
+    async def test_daily_schedule_persistence(self):
         from db import get_connection
         from config import get_berlin_now
         
@@ -266,7 +267,7 @@ class TestNewFeatures(unittest.TestCase):
             conn.commit()
             
         # 2. Generate new schedule (force=False)
-        bot.generate_daily_schedule(force=False)
+        await bot.generate_daily_schedule(force=False)
         
         # Verify entries exist
         with get_connection() as conn:
@@ -277,7 +278,7 @@ class TestNewFeatures(unittest.TestCase):
         self.assertGreater(len(rows1), 0)
         
         # 3. Call generate_daily_schedule(force=False) again, check they are persistent (not deleted/regenerated)
-        bot.generate_daily_schedule(force=False)
+        await bot.generate_daily_schedule(force=False)
         
         with get_connection() as conn:
             cursor = conn.cursor()
@@ -287,7 +288,7 @@ class TestNewFeatures(unittest.TestCase):
         self.assertEqual(rows1, rows2)
         
         # 4. Force regeneration, check that they are modified/different
-        bot.generate_daily_schedule(force=True)
+        await bot.generate_daily_schedule(force=True)
         
         with get_connection() as conn:
             cursor = conn.cursor()
@@ -299,14 +300,15 @@ class TestNewFeatures(unittest.TestCase):
         ids3 = [r["id"] for r in rows3]
         self.assertNotEqual(ids1, ids3)
 
-    @patch('bot.time.sleep', side_effect=KeyboardInterrupt)
+    @patch('bot.get_berlin_now')
+    @patch('bot.asyncio.sleep', side_effect=KeyboardInterrupt)
     @patch('bot.run_publish_cycle_by_type', return_value=(True, None))
-    def test_scheduler_catchup_spacing(self, mock_publish, mock_sleep):
+    async def test_scheduler_catchup_spacing(self, mock_publish, mock_sleep, mock_get_now):
         from db import get_connection
         from datetime import datetime, timedelta
-        from config import get_berlin_now
         
-        now = get_berlin_now()
+        now = datetime(2026, 6, 16, 12, 0, 0)
+        mock_get_now.return_value = now
         today_str = now.date().isoformat()
         
         # 1. Clear and insert 3 pending overdue posts
@@ -329,7 +331,7 @@ class TestNewFeatures(unittest.TestCase):
             
         # 2. Run scheduler loop once
         try:
-            bot.scheduler_thread()
+            await bot.scheduler_thread()
         except KeyboardInterrupt:
             pass
             
@@ -359,15 +361,16 @@ class TestNewFeatures(unittest.TestCase):
         expected_time3 = (now + timedelta(minutes=20)).strftime('%Y-%m-%d %H:%M')
         self.assertTrue(rows[2]["post_time"].startswith(expected_time3))
 
-    @patch('bot.time.sleep', side_effect=KeyboardInterrupt)
+    @patch('bot.get_berlin_now')
+    @patch('bot.asyncio.sleep', side_effect=KeyboardInterrupt)
     @patch('bot.run_publish_cycle_by_type', return_value=(False, "Mocked Failure"))
     @patch('bot.notify_admins_of_failure')
-    def test_scheduler_failure_rescheduling(self, mock_notify, mock_publish, mock_sleep):
+    async def test_scheduler_failure_rescheduling(self, mock_notify, mock_publish, mock_sleep, mock_get_now):
         from db import get_connection
         from datetime import datetime, timedelta
-        from config import get_berlin_now
         
-        now = get_berlin_now()
+        now = datetime(2026, 6, 16, 12, 0, 0)
+        mock_get_now.return_value = now
         today_str = now.date().isoformat()
         
         # 1. Clear and insert 1 pending overdue post
@@ -380,7 +383,7 @@ class TestNewFeatures(unittest.TestCase):
             
         # 2. Run scheduler loop once
         try:
-            bot.scheduler_thread()
+            await bot.scheduler_thread()
         except KeyboardInterrupt:
             pass
             
@@ -407,52 +410,118 @@ class TestNewFeatures(unittest.TestCase):
     @patch('bot.handle_regenerate')
     @patch('bot.handle_backup_db')
     @patch('bot.handle_start')
-    def test_new_reply_keyboard_buttons(self, mock_start, mock_backup, mock_regenerate, mock_analytics, mock_is_admin):
+    async def test_new_reply_keyboard_buttons(self, mock_start, mock_backup, mock_regenerate, mock_analytics, mock_is_admin):
         from bot import handle_menu_buttons
         
         # Test 📈 Аналітика
         mock_msg = MagicMock()
         mock_msg.text = "📈 Аналітика"
         mock_msg.from_user.id = 12345
-        handle_menu_buttons(mock_msg)
+        await handle_menu_buttons(mock_msg)
         mock_analytics.assert_called_once_with(mock_msg)
         
         # Test 🔄 Оновити розклад
         mock_msg.text = "🔄 Оновити розклад"
         mock_msg.from_user.id = 12345
-        handle_menu_buttons(mock_msg)
+        await handle_menu_buttons(mock_msg)
         mock_regenerate.assert_called_once_with(mock_msg)
         
         # Test 💾 Резервна копія БД
         mock_msg.text = "💾 Резервна копія БД"
         mock_msg.from_user.id = 12345
-        handle_menu_buttons(mock_msg)
+        await handle_menu_buttons(mock_msg)
         mock_backup.assert_called_once_with(mock_msg)
         
         # Test ℹ️ Довідка
         mock_msg.text = "ℹ️ Довідка"
         mock_msg.from_user.id = 12345
-        handle_menu_buttons(mock_msg)
+        await handle_menu_buttons(mock_msg)
         mock_start.assert_called_once_with(mock_msg)
 
     @patch('bot.bot.clear_step_handler_by_chat_id')
     @patch('bot.bot.process_new_messages')
-    def test_check_cancel_command_with_menu_button(self, mock_process, mock_clear):
+    async def test_check_cancel_command_with_menu_button(self, mock_process, mock_clear):
         from bot import check_cancel_command
         
         mock_msg = MagicMock()
         mock_msg.text = "📊 Статус"
         mock_msg.chat.id = 12345
         
-        res = check_cancel_command(mock_msg)
+        res = await check_cancel_command(mock_msg)
         self.assertTrue(res)
         mock_clear.assert_called_once_with(chat_id=12345)
         mock_process.assert_called_once_with([mock_msg])
         
         # Test regular text does not cancel
         mock_msg.text = "Just some text"
-        res_regular = check_cancel_command(mock_msg)
+        res_regular = await check_cancel_command(mock_msg)
         self.assertFalse(res_regular)
+
+    def test_parse_admin_input(self):
+        from bot import parse_admin_input
+        
+        # Test default order
+        uid, uname = parse_admin_input("123456 test_user")
+        self.assertEqual(uid, 123456)
+        self.assertEqual(uname, "test_user")
+        
+        # Test reverse order
+        uid, uname = parse_admin_input("test_user 123456")
+        self.assertEqual(uid, 123456)
+        self.assertEqual(uname, "test_user")
+        
+        # Test with @ symbol
+        uid, uname = parse_admin_input("123456 @test_user")
+        self.assertEqual(uid, 123456)
+        self.assertEqual(uname, "test_user")
+        
+        uid, uname = parse_admin_input("@test_user 123456")
+        self.assertEqual(uid, 123456)
+        self.assertEqual(uname, "test_user")
+        
+        # Test only ID
+        uid, uname = parse_admin_input("123456")
+        self.assertEqual(uid, 123456)
+        self.assertEqual(uname, "")
+        
+        # Test invalid cases raise ValueError
+        with self.assertRaises(ValueError):
+            parse_admin_input("not_an_id")
+        with self.assertRaises(ValueError):
+            parse_admin_input("")
+
+    @patch('bot.is_admin', return_value=True)
+    @patch('bot.set_setting')
+    @patch('bot.bot.reply_to')
+    async def test_stop_resume_commands(self, mock_reply, mock_set_setting, mock_is_admin):
+        from bot import handle_stop_command, handle_resume_command
+        
+        mock_msg = MagicMock()
+        mock_msg.chat.id = 12345
+        mock_msg.from_user.id = 12345
+        
+        await handle_stop_command(mock_msg)
+        mock_set_setting.assert_any_call("bot_stopped", "1")
+        self.assertTrue(mock_reply.called)
+        
+        await handle_resume_command(mock_msg)
+        mock_set_setting.assert_any_call("bot_stopped", "0")
+
+    @patch('bot.get_setting')
+    @patch('bot.asyncio.sleep')
+    async def test_loops_respect_stopped(self, mock_sleep, mock_get_setting):
+        from bot import scheduler_task, breaking_news_monitor_task
+        
+        # Make get_setting return "1" (stopped)
+        mock_get_setting.return_value = "1"
+        # Make sleep raise KeyboardInterrupt to exit the infinite loop
+        mock_sleep.side_effect = KeyboardInterrupt("exit_loop")
+        
+        with self.assertRaises(KeyboardInterrupt):
+            await scheduler_task()
+            
+        with self.assertRaises(KeyboardInterrupt):
+            await breaking_news_monitor_task()
 
 if __name__ == "__main__":
     unittest.main()
